@@ -40,6 +40,27 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The three crates reference each other by path with no version on purpose:
+#
+#   adapter/Cargo.toml  neotales-gotmpl, neotales-sprig  (adapter is publish = false)
+#   gotmpl/Cargo.toml   neotales-sprig, adapter          ([dev-dependencies])
+#   sprig/Cargo.toml    neotales-gotmpl, adapter         ([dev-dependencies])
+#
+# A path with no version is what keeps a dev-dependency out of the packaged
+# manifest: `cargo package` drops it, so each published crate names no sibling
+# and the two can be published in either order. Putting `version =
+# "=0.0.0-alpha.0"` beside the path keeps the edge in the packaged manifest as
+# a registry requirement, and `cargo publish --dry-run` then stops at
+# `failed to select a version for the requirement \`adapter = "=0.0.0-alpha.0"\``
+# because none of these crates are on crates.io, and adapter never will be.
+#
+# This is cargo-deny's documented exception for that case: a path dependency of
+# a private crate, and a path dev-dependency in any crate, is not counted as a
+# wildcard. It is not a blanket allowance. A path dependency in a public
+# crate's [dependencies] is still denied, so a real runtime edge from
+# neotales-gotmpl to neotales-sprig is still caught, which is the dependency
+# this workspace deliberately does not have.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
