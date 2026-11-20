@@ -154,14 +154,49 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      # Either order works: neither crate depends on the other. Gotmpl goes first
-      # only so the log has a fixed order.
-      - name: Publish the template crate
+      # One exchange covers every crate in this repository whose trusted
+      # publisher matches release.yml and an empty environment. crates.io puts
+      # each matching crate id on that token. A missing config rejects that
+      # crate only; do not treat that as index lag.
+      #
+      # Neither library depends on the other. Gotmpl goes first so the log has
+      # a fixed order. A re-run skips a version already on crates.io. Do not
+      # republish, and do not delete or move the tag.
+      - name: Publish both crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p neotales-gotmpl --locked
+        run: |
+          set -euo pipefail
 
-      - name: Publish the helper crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p neotales-sprig --locked
+          version_of() {
+            python3 - "$1" <<'PY'
+          import sys
+          import tomllib
+          with open(sys.argv[1], "rb") as handle:
+              version = tomllib.load(handle)["package"]["version"]
+          if not isinstance(version, str):
+              raise SystemExit(f"{sys.argv[1]} version is not a string")
+          print(version)
+          PY
+          }
+
+          registry_has() {
+            local crate="$1" version="$2" code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H 'User-Agent: neotales-release (https://github.com/neotales)' \
+              "https://crates.io/api/v1/crates/${crate}/${version}" || echo 000)
+            [ "$code" = "200" ]
+          }
+
+          publish_crate() {
+            local package="$1" manifest="$2" version
+            version=$(version_of "$manifest")
+            if registry_has "$package" "$version"; then
+              echo "$package $version is already on crates.io; not publishing again"
+              return 0
+            fi
+            cargo publish -p "$package" --locked
+          }
+
+          publish_crate neotales-gotmpl gotmpl/Cargo.toml
+          publish_crate neotales-sprig sprig/Cargo.toml

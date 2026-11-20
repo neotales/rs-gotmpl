@@ -105,7 +105,10 @@ at `~/work/rs/README.STYLE.md` and is not part of a crate.
 2. Push the commit.
 3. Tag it `vX.Y.Z` and push the tag.
 4. The workflow runs the checks, then a `cargo publish --dry-run` of both
-   crates, then publishes both with a token minted for that run.
+   crates, then publishes both. One OIDC exchange covers both crates when each
+   has a trusted publisher for this repository, `release.yml`, and an empty
+   environment. A re-run skips a version already on crates.io. Do not republish
+   it, and do not delete or move the tag.
 
 A manual run, `workflow_dispatch`, runs the checks and the dry run only. It
 never publishes, whatever branch it is started from.
