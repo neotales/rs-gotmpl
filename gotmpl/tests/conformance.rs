@@ -32,7 +32,7 @@ struct Fixture {
 
 #[test]
 fn renders_every_v1_conformance_fixture() {
-    let fixtures: FixtureSet = serde_json::from_str(include_str!("../fixtures/gotmpl/v1.json"))
+    let fixtures: FixtureSet = serde_json::from_str(include_str!("../../fixtures/gotmpl/v1.json"))
         .expect("checked-in fixture JSON must be valid");
     assert_eq!(fixtures.version, 1, "unsupported fixture format version");
 

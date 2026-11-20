@@ -113,7 +113,7 @@ const EXPECTED_CASES: usize = 276;
 fn cases() -> Vec<Case> {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/fixtures/sprig/upstream_parity.json"
+        "/../fixtures/sprig/upstream_parity.json"
     );
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("the Sprig parity fixture must be readable: {error}"));
@@ -277,7 +277,7 @@ fn reference_names() -> Vec<String> {
 
 /// Reads a checked-in fixture at the repository root.
 fn read_fixture(name: &str) -> String {
-    let path = format!("{}/fixtures/sprig/{name}", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{}/../fixtures/sprig/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("the Sprig fixture {name} must be readable: {error}"))
 }

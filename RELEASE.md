@@ -6,16 +6,21 @@ with a short-lived crates.io token obtained over OIDC. There is no
 
 ## The version rule
 
-The tag is `v` plus the version in `Cargo.toml`. Tag `v0.3.1` publishes the
-crate only if `Cargo.toml` says `version = "0.3.1"`. The `version` job fails the
-run otherwise, so a tag can never publish a version that differs from what is in
-the tree.
+The tag is `v` plus the version in the manifests. Tag `v0.3.1` publishes the
+crates only if `gotmpl/Cargo.toml` and `sprig/Cargo.toml` both say
+`version = "0.3.1"`. The `version` job fails the run when they differ from each
+other or from the tag, so a tag can never publish a version that differs from
+what is in the tree.
 
 This repository ships two crates that share the tag: `neotales-sprig` from
-`sprig/` and `neotales-gotmpl` from the repository root. `neotales-gotmpl`
-depends on `neotales-sprig` by version as well as by path, so sprig must already
-be on crates.io at that version before the tag run can publish gotmpl. Bump both
-manifests, publish sprig first, then tag.
+`sprig/` and `neotales-gotmpl` from `gotmpl/`. `neotales-gotmpl` depends on
+`neotales-sprig` by version as well as by path, so the publish job uploads sprig
+first and gotmpl second.
+
+The dry runs go in the same order, and the second one can still fail while the
+crates.io index has not caught up with the sprig upload from the same run. That
+failure is index lag, not a broken workspace: confirm with `cargo search
+neotales-sprig` and re-run the job once the index lists the version.
 
 Bump the version, commit, push, then tag that commit:
 
@@ -45,13 +50,14 @@ lives beside this folder, in `~/work/rs`, and is deliberately not copied into
 the crate repository: it is how the first version of every crate is uploaded,
 not part of any one crate.
 
-1. Set `version = "0.0.0-alpha.0"` in `Cargo.toml` and `sprig/Cargo.toml`,
-   commit it, and leave the working tree clean. Do not publish from a tree with
-   uncommitted changes.
-2. Run the script with the crate's directory:
+1. Set `version = "0.0.0-alpha.0"` in `gotmpl/Cargo.toml` and
+   `sprig/Cargo.toml`, commit it, and leave the working tree clean. Do not
+   publish from a tree with uncommitted changes.
+2. Run the script with each crate's directory, sprig first:
 
    ```sh
-   ~/work/rs/publish.sh <dir>
+   ~/work/rs/publish.sh sprig
+   ~/work/rs/publish.sh gotmpl
    ```
 
    The script reads the token itself and passes it to `cargo` through the
