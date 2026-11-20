@@ -1,14 +1,11 @@
-//! The `gotmpl` feature, exercised against the real engine.
+//! Loading Sprig helpers into the engine, exercised against the real engine.
 //!
-//! The glue itself lives in `src/gotmpl.rs`; this file is the only place in the
-//! crate that needs a template engine, and it needs one only to prove that a
-//! registered helper actually renders. `neotales-gotmpl` is the optional
-//! dependency that the feature turns on, so the default build of this crate never
-//! sees it.
+//! The two libraries do not depend on each other. The value conversion is
+//! `adapter`, a workspace crate that is not published, so this file and
+//! `neotales-gotmpl`'s tests share one copy of it. What is tested here is the
+//! loading API the engine offers: a named group, a second group added to the
+//! same map, the hermetic set, and a refusal that comes back as a message.
 
-// This file needs the engine, so the whole binary is behind the feature that
-// brings it in. Without the feature the file compiles to an empty test binary.
-#![cfg(feature = "gotmpl")]
 // `missing_docs` is a workspace lint aimed at the published API. A test binary
 // has no public API to document.
 #![allow(missing_docs)]
@@ -16,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use neotales_gotmpl::{Error, FuncMap, Template, Value};
-use neotales_sprig::{FunctionGroup, helper_names, register, register_group, register_hermetic};
+use neotales_sprig::{FunctionGroup, group_names, helper_names, hermetic_names};
 
 fn values() -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -25,23 +22,49 @@ fn values() -> BTreeMap<String, Value> {
     ])
 }
 
-/// One group registers the helpers in that group and nothing else.
+/// One group registers the helpers in that group and nothing else, and the map
+/// reports what was loaded.
 #[test]
 fn one_group_registers_its_own_helpers() {
     let mut functions = FuncMap::new();
-    register_group(&mut functions, FunctionGroup::Strings);
+    functions
+        .register_group(
+            "strings",
+            group_names(FunctionGroup::Strings),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
+
+    let recorded: Vec<&str> = functions
+        .group("strings")
+        .expect("the group was recorded")
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(recorded, group_names(FunctionGroup::Strings));
+    assert_eq!(functions.groups().collect::<Vec<_>>(), ["strings"]);
+
     let template = Template::parse("{{ .name | upper }}")
         .expect("parses")
         .with_funcs(functions);
     assert_eq!(template.render_typed(&values()).expect("renders"), "ACME");
+}
 
-    // `default` is in the Defaults group, which was not registered.
-    let mut strings_only = FuncMap::new();
-    register_group(&mut strings_only, FunctionGroup::Strings);
-    let template = Template::parse(r#"{{ default "fallback" .empty }}"#)
+/// `default` is in the Defaults group, which was not registered, so it is an
+/// unknown function rather than a silent empty value.
+#[test]
+fn a_group_only_registers_its_own_names() {
+    let mut functions = FuncMap::new();
+    functions
+        .register_group(
+            "strings",
+            group_names(FunctionGroup::Strings),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
+    let error = Template::parse(r#"{{ default "fallback" .empty }}"#)
         .expect("parses")
-        .with_funcs(strings_only);
-    let error = template
+        .with_funcs(functions)
         .render_typed(&values())
         .expect_err("the strings group does not include default");
     assert!(
@@ -54,13 +77,29 @@ fn one_group_registers_its_own_helpers() {
 #[test]
 fn a_second_group_is_added_without_replacing_the_first() {
     let mut functions = FuncMap::new();
-    register_group(&mut functions, FunctionGroup::Strings);
+    functions
+        .register_group(
+            "strings",
+            group_names(FunctionGroup::Strings),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
     assert!(functions.contains("upper"));
     assert!(!functions.contains("default"));
 
-    register_group(&mut functions, FunctionGroup::Defaults);
+    functions
+        .register_group(
+            "defaults",
+            group_names(FunctionGroup::Defaults),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
     assert!(functions.contains("upper"), "the first group was lost");
     assert!(functions.contains("default"));
+    assert_eq!(
+        functions.groups().collect::<Vec<_>>(),
+        ["defaults", "strings"]
+    );
 
     let template = Template::parse(r#"{{ .name | upper }}-{{ default "fallback" .empty }}"#)
         .expect("parses")
@@ -71,13 +110,30 @@ fn a_second_group_is_added_without_replacing_the_first() {
     );
 }
 
+/// A group with no name could not be reported, so it is refused. Nothing is
+/// registered and nothing panics.
+#[test]
+fn an_empty_group_name_is_refused() {
+    let mut functions = FuncMap::new();
+    for group in ["", "   "] {
+        let error = functions
+            .register_group(group, group_names(FunctionGroup::Strings), adapter::call)
+            .expect_err("an empty group name is refused");
+        assert_eq!(error, Error::EmptyGroupName);
+    }
+    assert!(functions.is_empty());
+    assert!(functions.groups().next().is_none());
+}
+
 /// The hermetic set is every implemented helper that reads no clock and no
 /// environment, and registering it is one call.
 #[test]
 fn the_hermetic_set_registers_in_one_call() {
     let mut functions = FuncMap::new();
-    register_hermetic(&mut functions);
-    assert_eq!(functions.len(), neotales_sprig::hermetic_names().len());
+    functions
+        .register_group("hermetic", &hermetic_names(), adapter::call)
+        .expect("the group name is not empty");
+    assert_eq!(functions.len(), hermetic_names().len());
     assert!(!functions.contains("now"));
     assert!(!functions.contains("ago"));
     assert!(!functions.contains("env"));
@@ -88,13 +144,15 @@ fn the_hermetic_set_registers_in_one_call() {
     assert_eq!(template.render_typed(&values()).expect("renders"), "ACME");
 }
 
-/// `register` takes any name list, including the full set, and the form that
+/// `register_names` loads a list without recording a group, and the form that
 /// reaches a helper through a value's method works once it is registered.
 #[test]
 fn every_implemented_name_can_be_registered() {
     let mut functions = FuncMap::new();
-    register(&mut functions, &helper_names());
+    functions.register_names(&helper_names(), adapter::call);
     assert_eq!(functions.len(), helper_names().len());
+    assert!(functions.groups().next().is_none());
+
     let template = Template::parse(r#"{{ semver "1.2.3" | (semver "1.3.3").Compare }}"#)
         .expect("parses")
         .with_funcs(functions);
@@ -105,7 +163,13 @@ fn every_implemented_name_can_be_registered() {
 #[test]
 fn the_data_structure_group_is_the_combined_set() {
     let mut functions = FuncMap::new();
-    register_group(&mut functions, FunctionGroup::DataStructures);
+    functions
+        .register_group(
+            "data_structures",
+            group_names(FunctionGroup::DataStructures),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
     let template =
         Template::parse(r#"{{ list 1 2 | join "-" }}|{{ dict "a" 1 "b" 2 | keys | join "," }}"#)
             .expect("parses")
@@ -116,25 +180,31 @@ fn the_data_structure_group_is_the_combined_set() {
     );
 }
 
-/// A helper that refuses is reported as a function error carrying the helper's
-/// own message, so a caller can tell which helper stopped the render.
+/// A helper that refuses stops the render with the helper's own message.
 #[test]
-fn a_helper_refusal_carries_its_name_and_message() {
+fn a_helper_refusal_carries_the_helper_message() {
     let mut functions = FuncMap::new();
-    register_group(&mut functions, FunctionGroup::Strings);
+    functions
+        .register_group(
+            "strings",
+            group_names(FunctionGroup::Strings),
+            adapter::call,
+        )
+        .expect("the group name is not empty");
     let error = Template::parse(r#"{{ trim "a" "b" }}"#)
         .expect("parses")
         .with_funcs(functions)
         .render_typed(&values())
         .expect_err("trim takes one argument");
-    match &error {
-        Error::Function { name, message } => {
-            assert_eq!(name, "trim");
-            assert_eq!(
-                message,
-                "safe Sprig helper trim expects 1 arguments, received 2"
-            );
+    assert_eq!(
+        error,
+        Error::Function {
+            name: String::new(),
+            message: "safe Sprig helper trim expects 1 arguments, received 2".to_owned(),
         }
-        other => panic!("expected a function error, got {other:?}"),
-    }
+    );
+    assert_eq!(
+        error.to_string(),
+        "safe Sprig helper trim expects 1 arguments, received 2"
+    );
 }

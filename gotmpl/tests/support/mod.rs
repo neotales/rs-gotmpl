@@ -1,33 +1,42 @@
 //! Loading the Sprig helper set into `neotales-gotmpl`.
 //!
-//! The two libraries do not depend on each other by default: `neotales-sprig` is
-//! a function set that names no engine, and `neotales-gotmpl` is an engine that
-//! names no helper set. The glue between them is `neotales-sprig`'s `gotmpl`
-//! feature, which this crate turns on for its tests, so there is exactly one copy
-//! of the value conversion and it lives in the crate that owns one of the two
-//! types.
+//! The two libraries do not depend on each other. `neotales-sprig` is a function
+//! set that names no engine, and `neotales-gotmpl` is an engine that names no
+//! helper set. The value conversion between them is `adapter`, a workspace crate
+//! that is not published, so this module and the rest of the tests share one
+//! copy of it instead of each writing their own.
 #![allow(dead_code)]
 
 use neotales_gotmpl::FuncMap;
 use neotales_sprig::FunctionGroup;
 
-/// Every helper this crate implements.
+/// Every helper the crate implements, loaded as one group.
 pub(crate) fn sprig_functions() -> FuncMap {
     let mut functions = FuncMap::new();
-    neotales_sprig::register(&mut functions, &neotales_sprig::helper_names());
+    functions
+        .register_group("sprig", &neotales_sprig::helper_names(), adapter::call)
+        .expect("the group name is not empty");
     functions
 }
 
 /// The helpers in one Go Sprig group.
 pub(crate) fn group_functions(group: FunctionGroup) -> FuncMap {
     let mut functions = FuncMap::new();
-    neotales_sprig::register_group(&mut functions, group);
+    functions
+        .register_group(
+            group.as_str(),
+            neotales_sprig::group_names(group),
+            adapter::call,
+        )
+        .expect("a group name from FunctionGroup::as_str is not empty");
     functions
 }
 
 /// The helpers whose answer depends on nothing but their arguments.
 pub(crate) fn hermetic_functions() -> FuncMap {
     let mut functions = FuncMap::new();
-    neotales_sprig::register_hermetic(&mut functions);
+    functions
+        .register_group("hermetic", &neotales_sprig::hermetic_names(), adapter::call)
+        .expect("the group name is not empty");
     functions
 }

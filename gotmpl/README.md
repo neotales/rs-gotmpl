@@ -51,7 +51,7 @@ assert_eq!(error, Error::MissingValue("name".to_owned()));
 ```
 
 **Register a function.** A function is a closure that takes the evaluated arguments, in
-source order and with any piped value last, and returns a `Value`. `FuncMap::insert` adds
+source order and with any piped value last, and returns a `Value`. `FuncMap::register` adds
 one; `Template::with_funcs` attaches the map to a parsed template. There is no second
 registration style: `len` and `index` are the language's own and need no map.
 
@@ -60,7 +60,8 @@ use std::collections::BTreeMap;
 
 use neotales_gotmpl::{FuncMap, Template, Value};
 
-let functions = FuncMap::new().with("shout", |arguments: &[Value]| {
+let mut functions = FuncMap::new();
+functions.register("shout", |arguments: &[Value]| {
     let Some(text) = arguments.first().and_then(Value::as_str) else {
         return Err(neotales_gotmpl::Error::Function {
             name: "shout".to_owned(),
@@ -73,6 +74,47 @@ let functions = FuncMap::new().with("shout", |arguments: &[Value]| {
 let template = Template::parse("Hello, {{ .name | shout }}")?.with_funcs(functions);
 let values = BTreeMap::from([("name".to_owned(), "acme".to_owned())]);
 assert_eq!(template.render(&values)?, "Hello, ACME");
+# Ok::<(), neotales_gotmpl::Error>(())
+```
+
+**Register a group.** A helper set is loaded by naming its functions once and dispatching
+on the name: `register_group` takes a group name you choose, the names in it, and one
+closure. The map keeps the group name so a caller can report what it loaded, a second group
+adds to the map rather than clearing it, and an empty group name is refused instead of
+silently dropped.
+
+```rust
+use std::collections::BTreeMap;
+
+use neotales_gotmpl::{FuncMap, Template, Value};
+
+let mut functions = FuncMap::new();
+functions.register_group("mine", &["shout", "whisper"], |name, arguments| {
+    let text = arguments.first().map(Value::render).unwrap_or_default();
+    Ok(Value::String(if name == "shout" {
+        text.to_uppercase()
+    } else {
+        text.to_lowercase()
+    }))
+})?;
+functions.register_group("extra", &["twice"], |_, arguments| {
+    let text = arguments.first().map(Value::render).unwrap_or_default();
+    Ok(Value::String(format!("{text}{text}")))
+})?;
+
+let loaded: Vec<&str> = functions
+    .group("mine")
+    .expect("loaded")
+    .iter()
+    .map(String::as_str)
+    .collect();
+assert_eq!(loaded, ["shout", "whisper"]);
+
+let values = BTreeMap::from([("name".to_owned(), "Acme".to_owned())]);
+let rendered = Template::parse("{{ .name | shout }}|{{ .name | twice }}")?
+    .with_funcs(functions)
+    .render(&values)?;
+assert_eq!(rendered, "ACME|AcmeAcme");
 # Ok::<(), neotales_gotmpl::Error>(())
 ```
 
@@ -89,13 +131,14 @@ hit returns `Error::ResourceLimitExceeded` without echoing the rendered values.
 state, and it calls no clock. Everything a template produces is a function of the values
 and the caller's function map.
 
-**Add Sprig if you want it.** `neotales-sprig` is a separate crate. A default build of it
-names no engine: its `gotmpl` feature adds `register`, `register_group` and
-`register_hermetic`, which load a name list, one Go Sprig group, or the hermetic set into a
-`FuncMap` without the caller writing the conversion. The
-[`neotales-sprig` README](../sprig/README.md) has the samples. Nothing here assumes any of it
-is present, and a template that calls a name the map does not hold fails with
-`Error::UnknownFunction` rather than rendering nothing.
+**A helper set is loaded the same way.** `neotales-sprig` is a separate crate that does not
+depend on this one; it loads its groups by passing `group_names` and its own dispatch
+closure to `register_group`, which is the sample in the
+[`neotales-sprig` README](../sprig/README.md). Any other helper set — a company's filters, a
+locale library, one project's own — uses `register_names` or `register_group` with its own
+group name and its own closure. Nothing here assumes any of them is present, and a template
+that calls a name the map does not hold fails with `Error::UnknownFunction` rather than
+rendering nothing.
 
 ## Licence 📜
 

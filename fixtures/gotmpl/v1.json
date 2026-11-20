@@ -334,7 +334,7 @@
       "data": {
         "value": "neo"
       },
-      "error": "template function trim failed: safe Sprig helper trim expects 1 arguments, received 2",
+      "error": "safe Sprig helper trim expects 1 arguments, received 2",
       "diagnostic": "unsupported_function"
     },
     {

@@ -74,63 +74,71 @@ assert!(group_names(FunctionGroup::Defaults).contains(&"default"));
 assert!(group_names(FunctionGroup::Crypto).is_empty());
 ```
 
-**Load the helpers into a template engine.** The `gotmpl` feature carries the glue for
-`neotales-gotmpl`: the conversion between the two value types, the argument policy, and the
-mapping from a helper's refusal to the engine's `Error::Function`. It is off by default, so a
-default build of this crate names no engine. The sample below needs it — `cargo test --doc
---all-features` is what compiles it.
+**Load the helpers into a template engine.** An engine loads a helper set by naming
+it once and dispatching on the name through `call`, so the loading step is the engine's
+own API. Here it is `neotales-gotmpl`, which takes a group name of your choosing, the
+names `group_names` returns, and one closure that converts the values and calls in.
+
+The conversion is the same for every group, so it is written once: `adapter::call` in
+`adapter/src/lib.rs` of this repository is a `match` on the nine value variants each way,
+and it is what these samples compile against. It cannot live in either library, because
+holding it would make one depend on the other.
 
 ```rust
 use std::collections::BTreeMap;
 
 use neotales_gotmpl::{FuncMap, Template};
-use neotales_sprig::{FunctionGroup, helper_names, register, register_group, register_hermetic};
+use neotales_sprig::{FunctionGroup, group_names, hermetic_names};
 
-// One group, registered on its own.
+// One group, under a name the caller chooses.
 let mut functions = FuncMap::new();
-register_group(&mut functions, FunctionGroup::Strings);
+functions.register_group("strings", group_names(FunctionGroup::Strings), adapter::call)?;
 
 let values = BTreeMap::from([("name".to_owned(), "acme".to_owned())]);
 let strings = Template::parse("{{ .name | upper }}")?.with_funcs(functions.clone());
 assert_eq!(strings.render(&values)?, "ACME");
 
-// A second group is added to the same map without replacing the first.
-register_group(&mut functions, FunctionGroup::Defaults);
-let defaults = BTreeMap::from([
-    ("name".to_owned(), "acme".to_owned()),
-    ("empty".to_owned(), String::new()),
-]);
-let both = Template::parse("{{ .name | upper }}-{{ default \"fallback\" .empty }}")?
-    .with_funcs(functions);
-assert_eq!(both.render(&defaults)?, "ACME-fallback");
-
 // The hermetic set: everything whose answer depends on nothing but its
 // arguments. `now` and `ago` read the clock and are not in it.
 let mut hermetic = FuncMap::new();
-register_hermetic(&mut hermetic);
+hermetic.register_group("hermetic", &hermetic_names(), adapter::call)?;
 assert!(!hermetic.contains("now"));
 let repeated = Template::parse("{{ .name | upper }}")?.with_funcs(hermetic);
 assert_eq!(repeated.render(&values)?, "ACME");
 
-// `register` takes any name list, so the whole implemented set is one call.
-let mut everything = FuncMap::new();
-register(&mut everything, &helper_names());
-assert!(everything.contains("semver.Compare"));
+// A second group adds to the same map without replacing the first, and the map
+// reports what each group put there.
+functions.register_group("defaults", group_names(FunctionGroup::Defaults), adapter::call)?;
+let loaded: Vec<&str> = functions
+    .group("defaults")
+    .expect("the group was recorded")
+    .iter()
+    .map(String::as_str)
+    .collect();
+assert!(loaded.contains(&"default"));
+
+let defaults = BTreeMap::from([
+    ("name".to_owned(), "acme".to_owned()),
+    ("empty".to_owned(), String::new()),
+]);
+let both =
+    Template::parse("{{ .name | upper }}-{{ default \"fallback\" .empty }}")?.with_funcs(functions);
+assert_eq!(both.render(&defaults)?, "ACME-fallback");
 # Ok::<(), neotales_gotmpl::Error>(())
 ```
 
-All three add to the map they are given: a name already present is replaced, and every other
-name is left alone. `register` takes any list of names, so `group_names` for one section,
-`helper_names` for all of them and `hermetic_names` for the repeatable subset are the three
-ways to ask for a set.
+`group_names`, `hermetic_names` and `helper_names` are plain name lists, so a group, the
+repeatable subset, and the whole set are all one `register_group` or `register_names` call
+away. A group Go has and this crate does not — the crypto, random and network ones — is
+empty rather than a stub, so nothing registers a name `call` would refuse.
 
 **Keep the environment out of it.** `env` and `expandenv` read the environment map on the
-`Context` passed to `call_with`, and `register` passes none, so through this glue they answer
-with the empty string. A template that needs a value from the environment should find it in
-the values map (`.env.NAME`) rather than read the host. That is the guarantee that matters: no
-helper reads the process environment, opens a file, a socket or a process. `now` and `ago`
-read the clock and are the only two that are not a pure function of their arguments, which is
-why `register_hermetic` leaves them out.
+`Context` passed to `call_with`, and `call` passes none, so through this loading step they
+answer with the empty string. A template that needs a value from the environment should
+find it in the values map (`.env.NAME`) rather than read the host. That is the guarantee
+that matters: no helper reads the process environment, opens a file, a socket or a
+process. `now` and `ago` read the clock and are the only two that are not a pure function
+of their arguments, which is why `hermetic_names` leaves them out.
 
 
 ## Licence 📜

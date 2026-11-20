@@ -1,0 +1,17 @@
+[package]
+name = "adapter"
+description = "Not published: the value conversion that loads neotales-sprig into neotales-gotmpl"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/neotales/rs-gotmpl"
+authors = ["x0craft"]
+publish = false
+
+[dependencies]
+neotales-gotmpl = { path = "../gotmpl" }
+neotales-sprig = { path = "../sprig" }
+
+[lints]
+workspace = true

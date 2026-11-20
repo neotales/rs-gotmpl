@@ -23,14 +23,23 @@ pub type Function = Arc<dyn Fn(&[Value]) -> Result<Value, Error> + Send + Sync +
 /// `text/template` knows nothing about Sprig and Sprig is loaded into a
 /// `template.FuncMap` by whoever wants it.
 ///
-/// A name that is not registered is [`Error::UnknownFunction`], never a silently
-/// empty value: a template that calls a function nobody supplied is a mistake
-/// worth reporting.
+/// There are three ways in, and none of them names a helper library:
+///
+/// - [`FuncMap::register`] adds one function.
+/// - [`FuncMap::register_names`] adds a name list through one `call` closure.
+/// - [`FuncMap::register_group`] does the same and records the names under a
+///   group name the caller chose, so the map can report what was loaded.
+///
+/// A set of functions is loaded by the code that owns the set, and the engine
+/// sees only names and closures. A name that is not registered is
+/// [`Error::UnknownFunction`], never a silently empty value: a template that
+/// calls a function nobody supplied is a mistake worth reporting.
 ///
 /// ```
 /// use neotales_gotmpl::{FuncMap, Template, Value};
 ///
-/// let functions = FuncMap::new().with("shout", |arguments: &[Value]| {
+/// let mut functions = FuncMap::new();
+/// functions.register("shout", |arguments: &[Value]| {
 ///     let Some(text) = arguments.first().and_then(Value::as_str) else {
 ///         return Err(neotales_gotmpl::Error::Function {
 ///             name: "shout".to_owned(),
@@ -50,6 +59,7 @@ pub type Function = Arc<dyn Fn(&[Value]) -> Result<Value, Error> + Send + Sync +
 #[derive(Clone, Default)]
 pub struct FuncMap {
     functions: BTreeMap<String, Function>,
+    groups: BTreeMap<String, Vec<String>>,
 }
 
 impl FuncMap {
@@ -61,14 +71,130 @@ impl FuncMap {
 
     /// Registers `function` under `name`, replacing any function already there.
     ///
-    /// The name is matched exactly and is case-sensitive, as a Go template's
-    /// function name is.
-    pub fn insert(
+    /// This is the one way a function is added, whether the caller owns one
+    /// function or a whole helper library. The name is matched exactly and is
+    /// case-sensitive, as a Go template's function name is. Adding a second
+    /// function never clears the map.
+    pub fn register(
         &mut self,
         name: impl Into<String>,
         function: impl Fn(&[Value]) -> Result<Value, Error> + Send + Sync + 'static,
     ) {
         self.functions.insert(name.into(), Arc::new(function));
+    }
+
+    /// Registers every name in `names` against one `call` closure.
+    ///
+    /// `call` is invoked with the name of the helper being called and the
+    /// arguments the engine evaluated, so a helper set is loaded by naming its
+    /// functions once and dispatching on the name inside the closure — the shape
+    /// a helper library's own `call(name, arguments)` already has. A second call
+    /// adds more names; it does not clear the map.
+    ///
+    /// ```
+    /// use neotales_gotmpl::{FuncMap, Template, Value};
+    ///
+    /// let mut functions = FuncMap::new();
+    /// functions.register_names(&["shout", "whisper"], |name, arguments| {
+    ///     let text = arguments.first().map(Value::render).unwrap_or_default();
+    ///     Ok(Value::String(if name == "shout" {
+    ///         text.to_uppercase()
+    ///     } else {
+    ///         text.to_lowercase()
+    ///     }))
+    /// });
+    ///
+    /// let values = [("name".to_owned(), "Acme".to_owned())].into_iter().collect();
+    /// let rendered = Template::parse("{{ .name | shout }}/{{ .name | whisper }}")
+    ///     .expect("parses")
+    ///     .with_funcs(functions)
+    ///     .render(&values)
+    ///     .expect("renders");
+    /// assert_eq!(rendered, "ACME/acme");
+    /// ```
+    pub fn register_names<C>(&mut self, names: &[&str], call: C)
+    where
+        C: Fn(&str, &[Value]) -> Result<Value, Error> + Send + Sync + 'static,
+    {
+        // The closure is shared by every registered name, so one helper set is
+        // one allocation rather than one copy of the dispatch per name.
+        let call = Arc::new(call);
+        for &name in names {
+            let call = Arc::clone(&call);
+            let helper = name.to_owned();
+            self.register(name, move |arguments: &[Value]| call(&helper, arguments));
+        }
+    }
+
+    /// Registers every name in `names` against one `call` closure, under a group
+    /// name the caller chose.
+    ///
+    /// The group is a label, not a category the engine understands: `"strings"`
+    /// and `"mine"` are equally valid, and two groups that share a name simply
+    /// accumulate. The names are recorded so [`FuncMap::group`] can report what
+    /// was loaded. A second group adds its names; it does not clear the map, and
+    /// a name registered twice is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EmptyGroupName`] for an empty or whitespace-only group
+    /// name, and registers nothing in that case. A group with no name could not
+    /// be reported, so it is refused rather than silently dropped.
+    ///
+    /// ```
+    /// use neotales_gotmpl::{FuncMap, Template, Value};
+    ///
+    /// let mut functions = FuncMap::new();
+    /// functions.register_group("mine", &["shout", "whisper"], |name, arguments| {
+    ///     let text = arguments.first().map(Value::render).unwrap_or_default();
+    ///     Ok(Value::String(if name == "shout" {
+    ///         text.to_uppercase()
+    ///     } else {
+    ///         text.to_lowercase()
+    ///     }))
+    /// })?;
+    ///
+    /// assert_eq!(functions.group("mine").expect("loaded"), ["shout", "whisper"]);
+    ///
+    /// let values = [("name".to_owned(), "Acme".to_owned())].into_iter().collect();
+    /// let rendered = Template::parse("{{ .name | shout }}")
+    ///     .expect("parses")
+    ///     .with_funcs(functions)
+    ///     .render(&values)
+    ///     .expect("renders");
+    /// assert_eq!(rendered, "ACME");
+    /// # Ok::<(), neotales_gotmpl::Error>(())
+    /// ```
+    pub fn register_group<C>(&mut self, group: &str, names: &[&str], call: C) -> Result<(), Error>
+    where
+        C: Fn(&str, &[Value]) -> Result<Value, Error> + Send + Sync + 'static,
+    {
+        if group.trim().is_empty() {
+            return Err(Error::EmptyGroupName);
+        }
+        self.register_names(names, call);
+        let recorded = self.groups.entry(group.to_owned()).or_default();
+        for &name in names {
+            recorded.push(name.to_owned());
+        }
+        recorded.sort_unstable();
+        recorded.dedup();
+        Ok(())
+    }
+
+    /// Returns the names recorded under `group`, sorted, or `None` if no group
+    /// has that name.
+    ///
+    /// The report is what was passed to [`FuncMap::register_group`], so a caller
+    /// can show the operator which set of functions a template was given.
+    #[must_use]
+    pub fn group(&self, group: &str) -> Option<&[String]> {
+        self.groups.get(group).map(Vec::as_slice)
+    }
+
+    /// Returns the recorded group names, in sorted order.
+    pub fn groups(&self) -> impl Iterator<Item = &str> {
+        self.groups.keys().map(String::as_str)
     }
 
     /// Returns this map with `function` registered under `name`.
@@ -81,7 +207,7 @@ impl FuncMap {
         name: impl Into<String>,
         function: impl Fn(&[Value]) -> Result<Value, Error> + Send + Sync + 'static,
     ) -> Self {
-        self.insert(name, function);
+        self.register(name, function);
         self
     }
 
@@ -123,6 +249,7 @@ impl fmt::Debug for FuncMap {
         formatter
             .debug_struct("FuncMap")
             .field("names", &self.names().collect::<Vec<_>>())
+            .field("groups", &self.groups().collect::<Vec<_>>())
             .finish()
     }
 }

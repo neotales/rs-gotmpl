@@ -418,12 +418,25 @@ pub enum Error {
     /// function's own explanation. The engine has no helper library, so it
     /// cannot restate a helper's reason and does not try to: the message is
     /// passed through unchanged.
+    ///
+    /// A function that was registered through [`FuncMap::register_names`] or
+    /// [`FuncMap::register_group`] usually has no name of its own at the point it
+    /// fails, because one closure answers for a whole list of names. That is what
+    /// [`Error::from`] a `String` produces: an unnamed function error whose
+    /// message stands as it was written.
     Function {
-        /// The name the function was registered under.
+        /// The name the function was registered under, or the empty string when
+        /// the message already names it.
         name: String,
         /// What the function said went wrong.
         message: String,
     },
+    /// A function group was registered with an empty name.
+    ///
+    /// A group is how [`FuncMap::group`] reports what was loaded, so a group with
+    /// no name could not be reported. Registering it is refused rather than
+    /// silently dropped.
+    EmptyGroupName,
     /// A control character appeared where the grammar does not allow one, with
     /// a description of which.
     UnexpectedControl(String),
@@ -456,9 +469,14 @@ impl fmt::Display for Error {
             }
             Self::MissingValue(path) => write!(output, "missing template value: .{path}"),
             Self::UnknownFunction(name) => write!(output, "unknown template function: {name}"),
+            // An unnamed function error's message already says what happened, so
+            // it is reported as it stands rather than behind a prefix with
+            // nothing between the words.
+            Self::Function { name, message } if name.is_empty() => output.write_str(message),
             Self::Function { name, message } => {
                 write!(output, "template function {name} failed: {message}")
             }
+            Self::EmptyGroupName => output.write_str("template function group name is empty"),
             Self::UnexpectedControl(action) => {
                 write!(output, "unexpected template control action: {action}")
             }
@@ -477,6 +495,23 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<String> for Error {
+    /// Reports a message from a function that did not name itself.
+    ///
+    /// A helper set dispatched through one closure — the shape
+    /// [`FuncMap::register_names`] and [`FuncMap::register_group`] take — knows
+    /// which name it is answering for inside the closure, not at the point it
+    /// builds an error. This conversion is how such a closure reports a refusal
+    /// without inventing a name: the message is kept as it was written, and
+    /// [`fmt::Display`] prints it unchanged.
+    fn from(message: String) -> Self {
+        Self::Function {
+            name: String::new(),
+            message,
+        }
+    }
+}
 
 impl Template {
     /// Parses the stable literal, expression, conditional, range, and with subset.

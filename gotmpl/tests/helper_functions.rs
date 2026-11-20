@@ -250,19 +250,18 @@ fn decodes_go_escape_forms_with_exact_lengths() {
 }
 
 /// A helper called with the wrong number of arguments is the helper's refusal,
-/// not the engine's: the engine passes the arguments and reports what came back.
+/// not the engine's: the engine passes the arguments, the shared dispatch closure
+/// reports what came back, and the helper's own message is what a caller sees.
 #[test]
 fn a_helper_called_with_the_wrong_arity_is_reported() {
     let error = render("{{ first 1 2 3 4 5 }}", &BTreeMap::new())
         .expect_err("the helper must refuse the call");
-    assert!(
-        matches!(&error, Error::Function { name, .. } if name == "first"),
-        "{error:?}"
-    );
     assert_eq!(
-        error.to_string(),
-        "template function first failed: safe Sprig helper first expects 1 arguments, \
-         received 5"
+        error,
+        Error::Function {
+            name: String::new(),
+            message: "safe Sprig helper first expects 1 arguments, received 5".to_owned(),
+        }
     );
 }
 

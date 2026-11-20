@@ -113,6 +113,9 @@ fn diagnostic_for_error(error: &neotales_gotmpl::Error) -> &'static str {
         neotales_gotmpl::Error::Function { .. } | neotales_gotmpl::Error::UnknownFunction(_) => {
             "unsupported_function"
         }
+        // Registration happens before a template is rendered, so no fixture can
+        // reach this one.
+        neotales_gotmpl::Error::EmptyGroupName => "registration_error",
         neotales_gotmpl::Error::UnterminatedAction
         | neotales_gotmpl::Error::UnterminatedComment
         | neotales_gotmpl::Error::EmptyAction

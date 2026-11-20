@@ -170,19 +170,6 @@ fn helpers_in(template: &str) -> Vec<String> {
     names
 }
 
-/// The message a case expects to see when a helper refuses a call.
-///
-/// Two reference cases assert the text of the exception a bad call throws. That
-/// text belongs to the helper, and the engine wraps it in
-/// [`neotales_gotmpl::Error::Function`] so a caller can tell which function
-/// refused; the part the reference specifies is the helper's own message.
-fn reported_message(error: &neotales_gotmpl::Error) -> String {
-    match error {
-        neotales_gotmpl::Error::Function { message, .. } => message.clone(),
-        other => other.to_string(),
-    }
-}
-
 /// Every case in the fixture must render to its expected text.
 #[test]
 fn every_upstream_parity_case_renders_exactly() {
@@ -241,7 +228,7 @@ fn every_upstream_parity_case_renders_exactly() {
             // satisfied by producing exactly that error. Without this the two
             // cases would report as failures while the helper was in fact
             // refusing the call the way the reference does.
-            Err(error) if reported_message(&error) == case.expected => {}
+            Err(error) if error.to_string() == case.expected => {}
             Err(error) => failures.push(format!(
                 "{:?}\n     expected {:?}\n     error     {error}\n     helpers   {:?}",
                 case.template,
