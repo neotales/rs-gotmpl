@@ -13,14 +13,14 @@ other or from the tag, so a tag can never publish a version that differs from
 what is in the tree.
 
 This repository ships two crates that share the tag: `neotales-sprig` from
-`sprig/` and `neotales-gotmpl` from `gotmpl/`. `neotales-gotmpl` depends on
-`neotales-sprig` by version as well as by path, so the publish job uploads sprig
-first and gotmpl second.
-
-The dry runs go in the same order, and the second one can still fail while the
-crates.io index has not caught up with the sprig upload from the same run. That
-failure is index lag, not a broken workspace: confirm with `cargo search
-neotales-sprig` and re-run the job once the index lists the version.
+`sprig/` and `neotales-gotmpl` from `gotmpl/`. They are independent: neither
+crate's published graph names the other, and the publish job can upload them in
+either order. The only edge between them is a dev-dependency each way, for the
+tests and for the sample in the `sprig` README, and cargo leaves a path-only
+dev-dependency out of the packaged manifest. That is why those two entries carry
+a `path` and no `version`: with a version, packaging would resolve the sibling
+from crates.io and the first publish of either crate would fail while the other
+does not exist yet.
 
 Bump the version, commit, push, then tag that commit:
 
@@ -53,7 +53,8 @@ not part of any one crate.
 1. Set `version = "0.0.0-alpha.0"` in `gotmpl/Cargo.toml` and
    `sprig/Cargo.toml`, commit it, and leave the working tree clean. Do not
    publish from a tree with uncommitted changes.
-2. Run the script with each crate's directory, sprig first:
+2. Run the script with each crate's directory, in either order: the two crates
+   do not depend on each other, so neither has to exist before the other.
 
    ```sh
    ~/work/rs/publish.sh sprig

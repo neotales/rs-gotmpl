@@ -51,6 +51,12 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features
 
+      # The crate READMEs are the samples a caller copies, and they are compiled
+      # as doctests. `--all-targets` does not run those, so they get a step of
+      # their own: a sample that no longer compiles is a broken front door.
+      - name: Doctests
+        run: cargo test --doc --all-features
+
       - name: Documentation
         env:
           RUSTDOCFLAGS: "-D warnings"

@@ -21,6 +21,19 @@
 //! worse outcome than a rendering that is not reproducible. `fixtures/sprig/
 //! out_of_scope.json` records them under `implemented_but_not_reproducible`, and
 //! a parity test checks that the exception is still exactly two names long.
+//!
+//! # Registering a set of helpers
+//!
+//! [`FunctionGroup`] splits this crate's helpers the way Go Sprig's `genericMap`
+//! is split, so a caller can register one section — [`group_names`] returns the
+//! names in it — instead of every name by hand. [`hermetic_names`] is the subset
+//! whose answer depends on nothing but its arguments, for a caller that needs the
+//! same bytes from two runs.
+//!
+//! This crate is not a template engine and does not depend on one. The README
+//! shows the whole glue for loading these helpers into `neotales-gotmpl`, or into
+//! any engine that takes a `(name, function)` map: [`call`] is the only entry
+//! point the glue needs.
 #![doc = include_str!("../README.md")]
 
 use std::fmt::Write as _;
@@ -32,6 +45,7 @@ mod defaults;
 mod dicts;
 mod encoding;
 mod env;
+mod groups;
 mod lists;
 mod math;
 mod musthelpers;
@@ -45,6 +59,7 @@ mod types;
 mod urls;
 
 pub use context::Context;
+pub use groups::{FunctionGroup, NONHERMETIC, group_names, hermetic_names};
 
 /// The signature every helper module dispatches through.
 ///
@@ -556,10 +571,16 @@ pub fn takes_rendered_strings(name: &str) -> bool {
         || musthelpers::takes_rendered_strings(name)
 }
 
-/// Every helper name this crate implements, sorted.
+/// Every name this crate implements, sorted.
 ///
 /// A conformance test compares this against the reference's registered set, so a
 /// helper that is added without a parity fixture is visible rather than silent.
+///
+/// The list includes `semver.Compare`, which is not a template helper name: a
+/// `Value::Method` carries it so an engine can dispatch
+/// `{{ (semver "1.3.3").Compare }}`. A caller that registers every name here can
+/// render that form; one that registers only names written in templates cannot,
+/// because the method has nothing to answer it.
 #[must_use]
 pub fn helper_names() -> Vec<&'static str> {
     let mut names = claims().to_vec();
@@ -793,6 +814,11 @@ const fn claims() -> &'static [&'static str] {
         "trimall",
         // Semantic versions.
         "semver",
+        // Reached through `Value::Method` rather than written by name in a
+        // template: `{{ (semver "1.3.3").Compare }}` carries this name and an
+        // engine dispatches it through its function map. It is listed because a
+        // caller registering helpers by name needs it to make that form work.
+        "semver.Compare",
         "semverCompare",
     ]
 }

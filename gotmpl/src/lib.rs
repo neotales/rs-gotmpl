@@ -1,9 +1,19 @@
 //! Pure, intentionally small Go `text/template` compatibility primitives.
+//!
+//! The engine parses and renders the Go template language and nothing else. The
+//! functions a template can call beyond the language's own `len` and `index` are
+//! supplied by the caller through [`FuncMap`], which is the same division Go
+//! itself makes: `text/template` has no helper library, and a helper set such as
+//! Sprig is loaded into it by whoever wants one.
 #![doc = include_str!("../README.md")]
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-pub use neotales_sprig::Value;
+mod functions;
+mod value;
+
+pub use functions::{FuncMap, Function};
+pub use value::Value;
 
 /// Bounds applied while parsing a template source.
 ///
@@ -269,10 +279,11 @@ impl<'a> RenderOptionsInput<'a> for &RenderOptions<'a> {
 ///     .collect();
 /// assert_eq!(template.render(&values).expect("renders"), "hello world");
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Template {
     parts: Vec<Part>,
     templates: BTreeMap<String, Vec<Part>>,
+    functions: FuncMap,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -395,9 +406,24 @@ pub enum Error {
     UnsupportedAction(String),
     /// A variable had no value in the supplied data, with its name.
     MissingValue(String),
-    /// A template helper refused to run. The inner error is the Sprig crate's,
-    /// so the reason is the helper's own rather than restated here.
-    Helper(neotales_sprig::Error),
+    /// A template called a name the caller's [`FuncMap`] does not hold.
+    ///
+    /// A name that is not registered is reported rather than rendered as an
+    /// empty value, because a template calling a function nobody supplied is a
+    /// mistake worth stopping for.
+    UnknownFunction(String),
+    /// A caller-supplied function refused the call.
+    ///
+    /// `name` is the name it was registered under and `message` is the
+    /// function's own explanation. The engine has no helper library, so it
+    /// cannot restate a helper's reason and does not try to: the message is
+    /// passed through unchanged.
+    Function {
+        /// The name the function was registered under.
+        name: String,
+        /// What the function said went wrong.
+        message: String,
+    },
     /// A control character appeared where the grammar does not allow one, with
     /// a description of which.
     UnexpectedControl(String),
@@ -429,7 +455,10 @@ impl fmt::Display for Error {
                 write!(output, "unsupported template action: {action}")
             }
             Self::MissingValue(path) => write!(output, "missing template value: .{path}"),
-            Self::Helper(error) => error.fmt(output),
+            Self::UnknownFunction(name) => write!(output, "unknown template function: {name}"),
+            Self::Function { name, message } => {
+                write!(output, "template function {name} failed: {message}")
+            }
             Self::UnexpectedControl(action) => {
                 write!(output, "unexpected template control action: {action}")
             }
@@ -542,7 +571,42 @@ impl Template {
             return Err(Error::UnexpectedControl(control.into()));
         }
         validate_named_template_graph(&templates, &state)?;
-        Ok(Self { parts, templates })
+        Ok(Self {
+            parts,
+            templates,
+            functions: FuncMap::new(),
+        })
+    }
+
+    /// Returns this template with a caller-supplied function map attached.
+    ///
+    /// Calling a name the map does not hold is [`Error::UnknownFunction`].
+    /// Functions live on the parsed template rather than on the render call, so
+    /// one parsed template rendered concurrently uses one immutable map.
+    ///
+    /// ```
+    /// use neotales_gotmpl::{FuncMap, Template, Value};
+    ///
+    /// let functions = FuncMap::new().with("twice", |arguments: &[Value]| {
+    ///     let text = arguments.first().map(Value::render).unwrap_or_default();
+    ///     Ok(Value::String(format!("{text}{text}")))
+    /// });
+    /// let template = Template::parse("{{ .name | twice }}")
+    ///     .expect("parses")
+    ///     .with_funcs(functions);
+    /// let values = [("name".to_owned(), "go".to_owned())].into_iter().collect();
+    /// assert_eq!(template.render(&values).expect("renders"), "gogo");
+    /// ```
+    #[must_use]
+    pub fn with_funcs(mut self, functions: FuncMap) -> Self {
+        self.functions = functions;
+        self
+    }
+
+    /// Returns the function map this template calls.
+    #[must_use]
+    pub fn functions(&self) -> &FuncMap {
+        &self.functions
     }
 
     /// Renders values without accessing host state.
@@ -617,7 +681,7 @@ impl Template {
     where
         O: RenderOptionsInput<'a>,
     {
-        let mut state = RenderState::new(options.render_options());
+        let mut state = RenderState::new(options.render_options(), &self.functions);
         state.check_cancelled()?;
         let root = Value::Map(values.clone());
         let mut context = Context::new(&root);
@@ -998,25 +1062,6 @@ impl Context {
         }
     }
 
-    /// Returns the template's environment, the `.env` namespace of the root.
-    ///
-    /// A template with no `.env` namespace has an empty environment rather than
-    /// none, so `env` reports an unset name as the empty string instead of
-    /// failing: Go's sprig `env` returns the empty string for a name that is not
-    /// set, and a template that relies on that must not need the namespace to
-    /// exist.
-    fn environment(&self) -> BTreeMap<String, String> {
-        let mut environment = BTreeMap::new();
-        if let Value::Map(root) = self.root.as_ref()
-            && let Some(Value::Map(entries)) = root.get("env")
-        {
-            for (key, value) in entries {
-                environment.insert(key.clone(), value.render());
-            }
-        }
-        environment
-    }
-
     fn with_dot(&self, dot: &Value) -> Self {
         Self {
             root: Arc::clone(&self.root),
@@ -1036,6 +1081,7 @@ impl Context {
 
 struct RenderState<'a> {
     options: &'a RenderOptions<'a>,
+    functions: &'a FuncMap,
     max_output_length: usize,
     max_iterations: usize,
     max_function_calls: usize,
@@ -1053,9 +1099,10 @@ struct RenderState<'a> {
 }
 
 impl<'a> RenderState<'a> {
-    fn new(options: &'a RenderOptions<'a>) -> Self {
+    fn new(options: &'a RenderOptions<'a>, functions: &'a FuncMap) -> Self {
         Self {
             options,
+            functions,
             max_output_length: options.max_output_length,
             max_iterations: options.max_iterations,
             max_function_calls: options.max_function_calls,
@@ -1426,11 +1473,11 @@ fn is_truthy(value: &Value) -> bool {
 
 /// Resolves Go's `len` and `index` builtins.
 ///
-/// Returns `Ok(None)` for a name that is not a builtin, so the helper library is
-/// tried next. `len` and `index` are the only two the reference's renderer
-/// registers, and they are here because they belong to the template language:
+/// Returns `Ok(None)` for a name that is not a builtin, so the caller's
+/// [`FuncMap`] is tried next. `len` and `index` are the only two the language
+/// provides, and they are here because they belong to the template language:
 /// `{{ len .Values }}` and `{{ index .Services 0 }}` are Go template code that
-/// happens to work in a Compose file, not Sprig.
+/// happens to work in a Compose file, not a helper library's.
 ///
 /// `len` counts **bytes** for a string, which is what Go's `len` does on a
 /// string and what the reference does too: `TemplateRenderer.cs::Length` returns
@@ -1620,26 +1667,30 @@ impl Invocation {
                 .first()
                 .ok_or_else(|| Error::UnsupportedAction("empty value".into()))
                 .and_then(|argument| argument.evaluate(context, state))?;
-            // A value that is a method is called rather than read. The
-            // reference's `semver` returns an object carrying a `Compare`
-            // method, and `{{ semver "1.2.3" | (semver "1.3.3").Compare }}` pipes
-            // the first version into the second's method. Without this the
-            // method would render as its own name, which is a wrong answer
-            // rather than an obvious failure.
+            // A value that is a method is called rather than read. A helper can
+            // return an object carrying a method, and
+            // `{{ (semver "1.3.3").Compare (semver "1.2.3") }}` pipes one value
+            // into the other's method. Without this the method would render as
+            // its own name, which is a wrong answer rather than an obvious
+            // failure.
             if let Value::Method { helper, receiver } = &value {
                 let Some(piped) = piped_value else {
                     return Err(Error::UnsupportedAction(format!(
                         "{helper} is a method and needs an argument"
                     )));
                 };
-                let call_arguments = vec![(**receiver).clone(), piped];
-                let environment = context.environment();
-                let result = neotales_sprig::call_with(
-                    helper,
-                    &call_arguments,
-                    &neotales_sprig::Context::with_environment(&environment),
-                )
-                .map_err(Error::Helper);
+                // Cloned out of the map so the borrow ends before the render
+                // state is touched again. A `Function` is an `Arc`, so this is a
+                // refcount bump rather than a copy of the closure.
+                let function = Arc::clone(
+                    state
+                        .functions
+                        .get(helper)
+                        .ok_or_else(|| Error::UnknownFunction(helper.clone()))?,
+                );
+                let call_arguments = [(*receiver.as_ref()).clone(), piped];
+                state.count_function_call()?;
+                let result = function(&call_arguments);
                 state.check_cancelled()?;
                 return result;
             }
@@ -1659,42 +1710,25 @@ impl Invocation {
         }
 
         // Go's two length-and-index builtins are part of the template language,
-        // not the helper library, so they are resolved here. The reference's
-        // renderer registers exactly these two alongside its helper set, and a
-        // template that pipes into `len` or indexes with `index` is ordinary Go
-        // template code rather than a Sprig call.
+        // not a helper library, so they are resolved here. A template that pipes
+        // into `len` or indexes with `index` is ordinary Go template code and
+        // works with no function map at all.
         if let Some(result) = builtin(helper, &arguments)? {
             state.check_cancelled()?;
             return Ok(result);
         }
 
-        // Which helpers want rendered strings and which want typed values is a
-        // property of the helpers, not of this engine. Asking the helper crate
-        // keeps a list of helper names from having to be kept in two places, and
-        // means a helper added there is described correctly here for free.
-        let rendered_arguments_wanted = neotales_sprig::takes_rendered_strings(helper);
-
-        let helper_arguments = if rendered_arguments_wanted {
-            // The string helpers consume the deterministic `Value` rendering.
-            // Passing bounded strings keeps their internal conversion from
-            // recursing past the render nesting limit.
-            let mut rendered = Vec::with_capacity(arguments.len());
-            for argument in &arguments {
-                let mut text = String::new();
-                state.render_value(argument, &mut text, true)?;
-                rendered.push(Value::String(text));
-            }
-            rendered
-        } else {
-            arguments
-        };
-
-        // `env` and `expandenv` read the template's own environment, which is
-        // the `.env` namespace of the root, not the process environment.
-        let environment = context.environment();
-        let sprig_context = neotales_sprig::Context::with_environment(&environment);
-        let result = neotales_sprig::call_with(helper, &helper_arguments, &sprig_context)
-            .map_err(Error::Helper);
+        // Which functions want rendered strings and which want typed values is a
+        // property of the function set, not of this engine, so the caller
+        // decides it inside the closure it registers. The engine hands over the
+        // evaluated values unchanged.
+        let function = Arc::clone(
+            state
+                .functions
+                .get(helper)
+                .ok_or_else(|| Error::UnknownFunction(helper.to_owned()))?,
+        );
+        let result = function(&arguments);
         state.check_cancelled()?;
         result
     }
@@ -1718,9 +1752,9 @@ impl Argument {
                 .and_then(|value| lookup(value, path, state)),
             // A bare token is a typed literal, not always a string. Go's grammar
             // gives `true`, `false`, and a number their own literal forms, and a
-            // helper that has to inspect a value — `empty`, `kindOf`, `int`,
-            // `compact` — cannot tell a boolean from the four characters
-            // `true` if both arrive as text. Quoted tokens were already unwrapped
+            // function that has to inspect a value — an emptiness test, a kind
+            // report, an integer conversion — cannot tell a boolean from the four
+            // characters `true` if both arrive as text. Quoted tokens were already unwrapped
             // by `parse_string_literal`, so a bare `true` is distinguishable
             // from a quoted `"true"` here: the latter kept its quotes only if the
             // value really contains them, and a template that means the text
@@ -1767,8 +1801,9 @@ fn literal_value(token: &str) -> Value {
 /// The second element of the pair says whether the literal was *written* as a
 /// float, which is not the same question as whether its value has a fractional
 /// part. `4.2` and `1e3` are floats; `0x10` and `3` are integers even though both
-/// have whole values. `kindOf` reports the difference and a whole float keeps its
-/// `.0`, so the spelling has to be carried rather than recovered from the value.
+/// have whole values. A kind-reporting function can see the difference and a
+/// whole float keeps its `.0`, so the spelling has to be carried rather than
+/// recovered from the value.
 fn parse_number_literal(token: &str) -> Option<(f64, bool)> {
     // An underscore is a digit separator in Go, not part of the value.
     let cleaned: String = token
@@ -1911,8 +1946,8 @@ fn parse_invocation(input: &str) -> Result<Invocation, Error> {
     // it as arguments.
     //
     // Before this the group was only recognised in an argument position, so
-    // every form above was parsed as a call to a helper *named* by the group
-    // and reported `unsupported safe Sprig helper: (list 1 2)`.
+    // every form above was parsed as a call to a function *named* by the group
+    // and failed with an unknown-function error naming it.
     if let Some(inner) = parenthesised_group(first).filter(|_| {
         tokens[1..]
             .iter()
@@ -2398,8 +2433,7 @@ fn trim_trailing_whitespace_lexeme(lexemes: &mut [Lexeme]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, MissingValueBehavior, RenderOptions, Template};
-    use neotales_sprig::Value;
+    use super::{Error, FuncMap, MissingValueBehavior, RenderOptions, Template, Value};
     use std::collections::BTreeMap;
 
     #[test]
@@ -2413,45 +2447,6 @@ mod tests {
     fn reports_missing_values_without_substitution() {
         let template = Template::parse("{{ .env.MISSING }}").unwrap();
         assert!(template.render(&BTreeMap::new()).is_err());
-    }
-
-    /// The two missing-value behaviors, and the idiom each one is for.
-    ///
-    /// `Error` is right for a configuration file: a typo should stop the render
-    /// rather than become an empty value a container is then started with.
-    /// `Null` is what Go's own `text/template` does and is what
-    /// `{{ .env.OPTIONAL | default "x" }}` needs — under `Error` that idiom
-    /// cannot be written at all, because the failure happens at the field access
-    /// before `default` ever sees a value.
-    #[test]
-    fn a_missing_field_is_an_error_or_null_by_configuration() {
-        let source = "{{ .env.OPTIONAL | default \"fallback\" }}";
-        let template = Template::parse(source).expect("parses");
-        let root = BTreeMap::from([("env".to_owned(), Value::Map(BTreeMap::new()))]);
-
-        let strict = RenderOptions::default();
-        let error = template
-            .render_typed_with_options(&root, strict)
-            .expect_err("the default must stop on a value that is not there");
-        assert!(
-            matches!(error, Error::MissingValue(ref path) if path == "env.OPTIONAL"),
-            "{error}"
-        );
-
-        let lenient = RenderOptions {
-            missing_value: MissingValueBehavior::Null,
-            ..RenderOptions::default()
-        };
-        // The root carries `env` as an empty map, which is the shape a Compose
-        // template sees: the namespace always exists, and a variable inside it
-        // may not.
-        let root = BTreeMap::from([("env".to_owned(), Value::Map(BTreeMap::new()))]);
-        assert_eq!(
-            template
-                .render_typed_with_options(&root, lenient)
-                .expect("a helper can answer for a null"),
-            "fallback"
-        );
     }
 
     /// `Null` only forgives a value a helper can stand in for.
@@ -2474,156 +2469,59 @@ mod tests {
         );
     }
 
-    /// A value that *is* set is unaffected by the choice.
-    #[test]
-    fn the_behavior_does_not_change_a_value_that_is_present() {
-        let template = Template::parse("{{ .env.SET | default \"fallback\" }}").expect("parses");
-        let values = BTreeMap::from([(
-            "env".to_owned(),
-            Value::Map(BTreeMap::from([(
-                "SET".to_owned(),
-                Value::String("actual".to_owned()),
-            )])),
-        )]);
-        for missing_value in [MissingValueBehavior::Error, MissingValueBehavior::Null] {
-            let options = RenderOptions {
-                missing_value,
-                ..RenderOptions::default()
-            };
-            assert_eq!(
-                template
-                    .render_typed_with_options(&values, options)
-                    .expect("renders"),
-                "actual",
-                "{missing_value:?} must not affect a value that is set"
-            );
-        }
-    }
-
-    #[test]
-    fn evaluates_safe_helpers_and_pipelines_without_host_access() {
-        let template = Template::parse("{{ .env.NAME | trim | upper | quote }}").unwrap();
-        let values = BTreeMap::from([("env.NAME".into(), " acme ".into())]);
-        assert_eq!(template.render(&values).unwrap(), "\"ACME\"");
-
-        let default = Template::parse("{{ default \"fallback\" .env.VALUE }}").unwrap();
-        let values = BTreeMap::from([("env.VALUE".into(), String::new())]);
-        assert_eq!(default.render(&values).unwrap(), "fallback");
-    }
-
-    #[test]
-    fn rejects_unsafe_or_unknown_helpers() {
-        // A name no helper claims is still an error, and a helper that cannot do
-        // what it was asked still errors rather than substituting a value. Both
-        // are what the parity suite relies on to mean anything: a suite where an
-        // unknown helper silently rendered nothing would pass by not trying.
-        assert!(
-            Template::parse("{{ notAHelper \"x\" }}")
-                .unwrap()
-                .render(&BTreeMap::new())
-                .is_err(),
-            "an unknown helper must not render"
-        );
-        assert!(
-            Template::parse("{{ first 1 2 3 4 5 }}")
-                .unwrap()
-                .render(&BTreeMap::new())
-                .is_err(),
-            "a helper called with the wrong arity must not render"
-        );
-    }
-
-    /// `env` reads the template's own environment and nothing else.
+    /// A name the caller's map does not hold is reported, never rendered as an
+    /// empty value.
     ///
-    /// It used to be rejected outright as unsafe, which is right in spirit — a
-    /// template must not read the process environment — but rejecting the name
-    /// meant a template written against the reference could not be used at all.
-    /// Reading the template's `.env` is the safe form of the same helper: the
-    /// rendered file still depends only on its inputs.
+    /// This is what the parity suite relies on to mean anything: a suite where an
+    /// unknown function silently rendered nothing would pass by not trying.
     #[test]
-    fn env_reads_the_template_environment_and_nothing_else() {
-        let mut root = BTreeMap::new();
-        root.insert("env.NAME".to_owned(), "neo".to_owned());
-        let rendered = Template::parse("{{ env \"NAME\" }}")
+    fn an_unknown_function_is_reported_rather_than_rendered() {
+        let error = Template::parse("{{ notAHelper \"x\" }}")
+            .unwrap()
+            .render(&BTreeMap::new())
+            .expect_err("an unknown function must not render");
+        assert_eq!(error, Error::UnknownFunction("notAHelper".to_owned()));
+    }
+
+    /// The language's own builtins need no function map at all.
+    #[test]
+    fn the_builtins_need_no_function_map() {
+        let template = Template::parse(r#"{{ len "abc" }}|{{ index "abc" 0 }}"#).unwrap();
+        assert_eq!(template.render(&BTreeMap::new()).unwrap(), "3|97");
+    }
+
+    /// A registered function receives the evaluated arguments, with a piped value
+    /// appended as the last one.
+    #[test]
+    fn a_registered_function_receives_the_evaluated_arguments() {
+        let functions = FuncMap::new().with("add-all", |arguments: &[Value]| {
+            Ok(Value::Number(arguments.iter().map(Value::as_number).sum()))
+        });
+        let template = Template::parse("{{ add-all 1 2 3 }}|{{ 4 | add-all }}")
             .expect("parses")
-            .render(&root)
-            .expect("renders");
-        assert_eq!(rendered, "neo");
-        // A name that is not set is the empty string, as Go's sprig `env` is,
-        // rather than an error: a template that probes for an optional value
-        // must not fail because the value is absent.
-        let absent = Template::parse("{{ env \"ABSENT\" }}")
+            .with_funcs(functions);
+        assert_eq!(template.render(&BTreeMap::new()).expect("renders"), "6|4");
+    }
+
+    /// A function that refuses stops the render and its own message is what the
+    /// caller sees.
+    #[test]
+    fn a_function_that_refuses_stops_the_render() {
+        let functions = FuncMap::new().with("refuse", |_: &[Value]| {
+            Err(Error::Function {
+                name: "refuse".to_owned(),
+                message: "not today".to_owned(),
+            })
+        });
+        let error = Template::parse("{{ refuse }}")
             .expect("parses")
-            .render(&root)
-            .expect("renders");
-        assert_eq!(absent, "");
-    }
-
-    /// A bare token in a template has its Go literal type.
-    ///
-    /// Before this, every bare token was text, so `empty false` reported that
-    /// `false` was not empty and `kindOf 42` reported `string`. A helper that
-    /// inspects a value cannot tell a boolean from the four characters `true` if
-    /// both arrive as text.
-    #[test]
-    fn a_bare_token_carries_its_go_literal_type() {
-        let cases = [
-            ("{{ kindOf true }}", "bool"),
-            ("{{ kindOf 42 }}", "int"),
-            ("{{ kindOf 4.2 }}", "float64"),
-            ("{{ empty false }}", "true"),
-            ("{{ empty 0 }}", "true"),
-            ("{{ int true }}", "1"),
-            ("{{ float64 true }}", "1"),
-            ("{{ 0x10 }}", "16"),
-            ("{{ 0o10 }}", "8"),
-            ("{{ 0b101 }}", "5"),
-            ("{{ 010 }}", "8"),
-            ("{{ 1_000 }}", "1000"),
-            // A quoted number is text, which is the distinction a caller needs.
-            ("{{ kindOf \"42\" }}", "string"),
-            // A word that is not a number stays text.
-            ("{{ kindOf alpha }}", "string"),
-        ];
-        for (source, expected) in cases {
-            let rendered = Template::parse(source)
-                .unwrap_or_else(|error| panic!("{source} should parse: {error}"))
-                .render(&BTreeMap::new())
-                .unwrap_or_else(|error| panic!("{source} should render: {error}"));
-            assert_eq!(rendered, expected, "{source}");
-        }
-    }
-
-    /// A negative literal keeps its sign.
-    ///
-    /// The sign was applied twice on the way in once, which turned `-3` into `3`
-    /// and made `until -3` count up.
-    #[test]
-    fn a_negative_literal_keeps_its_sign() {
-        for (source, expected) in [
-            ("{{ until -3 }}", "[0 -1 -2]"),
-            ("{{ until 3 }}", "[0 1 2]"),
-            ("{{ untilStep 1 6 2 }}", "[1 3 5]"),
-        ] {
-            let rendered = Template::parse(source)
-                .unwrap_or_else(|error| panic!("{source} should parse: {error}"))
-                .render(&BTreeMap::new())
-                .unwrap_or_else(|error| panic!("{source} should render: {error}"));
-            assert_eq!(rendered, expected, "{source}");
-        }
-    }
-
-    #[test]
-    fn renders_nested_conditionals_with_go_template_truthiness() {
-        let template = Template::parse(
-            "{{ if .env.ENABLED }}yes {{ if contains \"acm\" .env.NAME }}acm{{ else }}other{{ end }}{{ else }}no{{ end }}",
-        )
-        .unwrap();
-        let values = BTreeMap::from([
-            ("env.ENABLED".into(), "true".into()),
-            ("env.NAME".into(), "acme".into()),
-        ]);
-        assert_eq!(template.render(&values).unwrap(), "yes acm");
+            .with_funcs(functions)
+            .render(&BTreeMap::new())
+            .expect_err("the function refused");
+        assert_eq!(
+            error.to_string(),
+            "template function refuse failed: not today"
+        );
     }
 
     #[test]
@@ -2705,25 +2603,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_go_quoted_and_raw_strings() {
-        let template =
-            Template::parse("{{ contains \"neo\\n\" .value }}|{{ contains `raw text` .value }}")
-                .unwrap();
-        let values = BTreeMap::from([("value".into(), Value::String("neo\nraw text".into()))]);
-        assert_eq!(template.render_typed(&values).unwrap(), "true|true");
-    }
-
-    #[test]
-    fn contains_uses_sprig_substring_first_in_calls_and_pipelines() {
-        let template = Template::parse(
-            "{{ contains \"Acm\" .value }}|{{ .value | contains \"Acm\" }}|{{ contains .value \"Acm\" }}",
-        )
-        .unwrap();
-        let values = BTreeMap::from([("value".into(), " Acme ".into())]);
-        assert_eq!(template.render(&values).unwrap(), "true|true|false");
-    }
-
-    #[test]
     fn requires_spaced_trim_markers_and_trims_only_ascii_whitespace() {
         let template = Template::parse("a \t\n{{- .value -}}\r\n\tb").unwrap();
         let values = BTreeMap::from([("value".into(), "x".into())]);
@@ -2766,20 +2645,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_go_escape_forms_with_exact_lengths() {
-        let template = Template::parse(
-            "{{ contains \"\\x41\\102\\u0043\\U00000044\\n\" .value }}|{{ .value }}|{{ \"\\xC3\\xA9\" }}",
-        )
-        .unwrap();
-        let values = BTreeMap::from([("value".into(), "ABCD\n".into())]);
-        assert_eq!(template.render(&values).unwrap(), "true|ABCD\n|é");
-
-        for source in [r#"{{ "\x4" }}"#, r#"{{ "\12" }}"#, r#"{{ "\q" }}"#] {
-            assert!(Template::parse(source).is_err(), "accepted {source:?}");
-        }
-    }
-
-    #[test]
     fn renders_named_templates_with_nested_calls() {
         let template = Template::parse(
             "{{ define \"line\" }}{{ .name }}{{ end }}{{ define \"list\" }}{{ range . }}{{ template \"line\" . }};{{ end }}{{ end }}{{ template \"list\" .items }}",
@@ -2804,8 +2669,7 @@ mod tests {
 
 #[cfg(test)]
 mod builtin_tests {
-    use super::{Template, builtin, index};
-    use neotales_sprig::Value;
+    use super::{Template, Value, builtin, index};
     use std::collections::BTreeMap;
 
     fn list(values: &[Value]) -> Value {
@@ -3050,131 +2914,6 @@ mod builtin_tests {
                 .render_typed(&BTreeMap::new())
                 .expect("renders");
             assert_eq!(rendered, expected, "{source}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod grouped_argument_tests {
-    use super::{Template, Value};
-    use std::collections::BTreeMap;
-
-    fn render(source: &str) -> String {
-        let mut root = BTreeMap::new();
-        root.insert("name".to_owned(), Value::String("neo".to_owned()));
-        Template::parse(source)
-            .expect("parses")
-            .render_typed(&root)
-            .expect("renders")
-    }
-
-    /// Go's grammar allows an argument to be a parenthesised pipeline, and
-    /// passing a composed value that way is ordinary template code. Before this
-    /// was supported the argument tokenized as three tokens, so the helper was
-    /// handed the wrong operands and rendered the wrong answer rather than
-    /// reporting an error.
-    #[test]
-    fn a_parenthesised_pipeline_is_one_argument() {
-        assert_eq!(render(r#"{{ upper (trim " go " | repeat 2) }}"#), "GOGO");
-        assert_eq!(render(r#"{{ len (splitList "-" "a-b-c") }}"#), "3");
-    }
-
-    #[test]
-    fn a_group_may_contain_spaces_and_nested_groups() {
-        assert_eq!(
-            render(r#"{{ upper (trim "  neo  ") }}{{ lower (upper "AB") }}"#),
-            "NEOab"
-        );
-    }
-
-    #[test]
-    fn a_group_may_be_nested() {
-        assert_eq!(render(r#"{{ upper (repeat (len "ab") "z") }}"#), "ZZ");
-    }
-
-    /// A `(` with no partner is a malformed action, not a literal.
-    #[test]
-    fn an_unbalanced_parenthesis_is_rejected() {
-        for source in [r#"{{ upper (trim " go " }}"#, r#"{{ ( "x" }}"#] {
-            assert!(
-                Template::parse(source).is_err(),
-                "{source} should not parse"
-            );
-        }
-    }
-
-    /// A `(` inside a quoted string is text, not a group.
-    #[test]
-    fn a_parenthesis_inside_a_string_is_not_a_group() {
-        assert_eq!(render(r#"{{ upper "a(b" }}"#), "A(B");
-    }
-
-    /// A group in the *first* position is a value, not a call to a helper whose
-    /// name happens to be the group.
-    ///
-    /// The reference asserts this form itself,
-    /// `SprigUpstreamParityTests.cs:519-522`:
-    ///
-    /// ```csharp
-    /// [InlineData(
-    ///     "{{ range (tuple 1 2 3 4 5 6 7 8 | mustChunk 3) }}" +
-    ///     "{{ . | join \"-\" }}|{{ end }}",
-    ///     "1-2-3|4-5-6|7-8|")]
-    /// ```
-    ///
-    /// Before this was supported the action parsed as a call to a helper named
-    /// `(tuple 1 2 3 4 5 6 7 8 | mustChunk 3)` and rendered
-    /// `unsupported safe Sprig helper: (tuple 1 2 3 4 5 6 7 8 | mustChunk 3)`.
-    #[test]
-    fn a_group_in_first_position_is_a_value() {
-        assert_eq!(
-            render(
-                r#"{{ range (tuple 1 2 3 4 5 6 7 8 | mustChunk 3) }}{{ . | join "-" }}|{{ end }}"#
-            ),
-            "1-2-3|4-5-6|7-8|"
-        );
-        assert_eq!(render(r#"{{ (upper "a") }}"#), "A");
-    }
-
-    /// Go 1.27.1 `text/template`, same templates, same data:
-    /// `{{ range (list 1 2) }}` → `1;2;`, `{{ range (tuple 1 2 3 4 5 | chunk 3) }}`
-    /// → `1,2,3|4,5|`, `{{ with (dict "a" 1) }}{{ .a }}{{ end }}` → `1`, and
-    /// `{{ range $i, $v := (list 10 20) }}` → `0=10;1=20;`.
-    #[test]
-    fn a_group_is_a_value_in_every_expression_position() {
-        assert_eq!(render(r"{{ range (list 1 2) }}{{ . }};{{ end }}"), "1;2;");
-        assert_eq!(
-            render(r#"{{ range (tuple 1 2 3 4 5 | chunk 3) }}{{ join "," . }}|{{ end }}"#),
-            "1,2,3|4,5|"
-        );
-        assert_eq!(render(r#"{{ with (dict "a" 1) }}{{ .a }}{{ end }}"#), "1");
-        assert_eq!(
-            render(r"{{ range $i, $v := (list 10 20) }}{{ $i }}={{ $v }};{{ end }}"),
-            "0=10;1=20;"
-        );
-        // A field read off a group is the same value reached the other way round.
-        assert_eq!(render(r#"{{ (dict "a" 1).a }}"#), "1");
-    }
-
-    /// Two groups in one action are two values, which is not a call, so the
-    /// action is refused. Go 1.27.1 reports `can't give argument to non-function
-    /// upper "a"` for the first and `unexpected "(" in operand` for the second,
-    /// where a token that is not one whole group must not be read as one: the
-    /// body of `(a)(b)` would otherwise be `a)(b`.
-    #[test]
-    fn two_groups_in_one_action_are_not_a_group() {
-        for source in [
-            r#"{{ (upper "a") (upper "b") }}"#,
-            r#"{{ (upper "a")(upper "b") }}"#,
-            r"{{ range (list 1 2) (list 3) }}{{ end }}",
-            r"{{ (1 2) }}",
-        ] {
-            assert!(
-                Template::parse(source)
-                    .and_then(|t| t.render_typed(&BTreeMap::new()))
-                    .is_err(),
-                "{source} should not render"
-            );
         }
     }
 }

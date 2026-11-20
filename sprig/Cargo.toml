@@ -11,7 +11,15 @@ readme = "README.md"
 keywords = ["template", "sprig", "helm", "go", "helpers"]
 categories = ["template-engine", "text-processing"]
 
-[dependencies]
+[dev-dependencies]
+# The README's load-into-a-template sample is compiled as a doctest, so the
+# template crate is needed here to show the glue. It is a dev-dependency: this
+# library compiles and publishes with no knowledge of any engine.
+#
+# The path carries no version on purpose. Cargo drops a path-only dev-dependency
+# from the packaged manifest, so this crate can be published before the template
+# crate exists on crates.io; the doctest keeps working from the checkout.
+neotales-gotmpl = { path = "../gotmpl" }
 
 [lints]
 workspace = true

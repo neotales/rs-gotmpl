@@ -325,7 +325,7 @@
       "name": "unsupported_helper",
       "template": "{{ unknown \"value\" }}",
       "data": {},
-      "error": "unsupported safe Sprig helper: unknown",
+      "error": "unknown template function: unknown",
       "diagnostic": "unsupported_function"
     },
     {
@@ -334,7 +334,7 @@
       "data": {
         "value": "neo"
       },
-      "error": "safe Sprig helper trim expects 1 arguments, received 2",
+      "error": "template function trim failed: safe Sprig helper trim expects 1 arguments, received 2",
       "diagnostic": "unsupported_function"
     },
     {

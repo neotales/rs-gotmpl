@@ -32,8 +32,9 @@ env:
 jobs:
   # Runs on both triggers. On workflow_dispatch this job is the whole release:
   # checks and a `cargo publish --dry-run` of both crates, never a real publish.
-  # The dry runs go in publish order, sprig then gotmpl, because gotmpl depends
-  # on sprig by version as well as by path.
+  # The dry runs can go in either order: the two crates do not depend on each
+  # other, and the dev-dependency between them is path-only so packaging drops
+  # it. See RELEASE.md.
   check:
     name: pre-publish checks
     runs-on: ubuntu-latest
@@ -54,9 +55,8 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features
 
-      # The second dry run can fail while the crates.io index has not caught up
-      # with the sprig upload from this same run. That failure is the index, not
-      # the workspace. See RELEASE.md.
+      # Neither crate depends on the other, so any order works and a failure is
+      # about the crate itself rather than about index lag. See RELEASE.md.
       - name: Package without publishing
         run: |
           cargo publish -p neotales-sprig --dry-run --locked
@@ -146,9 +146,8 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      # Sprig first: neotales-gotmpl depends on it by version. The second
-      # upload can fail while the index has not caught up with the first; that
-      # is index lag, and re-running the job is the fix. See RELEASE.md.
+      # The two crates are independent, so the order does not matter. Sprig is
+      # uploaded first only so the log has a fixed order.
       - name: Publish the helper crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

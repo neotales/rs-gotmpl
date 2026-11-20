@@ -9,10 +9,14 @@
 // item in the crate is still reported.
 #![allow(missing_docs)]
 
+mod support;
+
 use std::collections::BTreeMap;
 
 use neotales_gotmpl::{Template, Value};
 use serde::Deserialize;
+
+use support::sprig_functions;
 
 #[derive(Deserialize)]
 struct FixtureSet {
@@ -67,7 +71,11 @@ fn renders_every_v1_conformance_fixture() {
         }
 
         let expected_diagnostic = diagnostic.as_deref();
+        // The fixture's cases call Sprig helpers, so the case is rendered with
+        // the helper set loaded the way a caller loads it. The engine has no
+        // helper library of its own.
         let rendered = Template::parse(&template)
+            .map(|template| template.with_funcs(sprig_functions()))
             .and_then(|template| template.render_typed(&fixture_data(data)));
         match (output, error, expected_diagnostic, rendered) {
             (Some(expected), None, None, Ok(actual)) => {
@@ -102,7 +110,9 @@ fn diagnostic_for_error(error: &neotales_gotmpl::Error) -> &'static str {
         neotales_gotmpl::Error::MissingValue(_) => "missing_value",
         neotales_gotmpl::Error::MissingVariable(_) => "missing_variable",
         neotales_gotmpl::Error::MissingTemplate(_) => "missing_template",
-        neotales_gotmpl::Error::Helper(_) => "unsupported_function",
+        neotales_gotmpl::Error::Function { .. } | neotales_gotmpl::Error::UnknownFunction(_) => {
+            "unsupported_function"
+        }
         neotales_gotmpl::Error::UnterminatedAction
         | neotales_gotmpl::Error::UnterminatedComment
         | neotales_gotmpl::Error::EmptyAction

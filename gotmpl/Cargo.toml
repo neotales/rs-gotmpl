@@ -1,6 +1,6 @@
 [package]
 name = "neotales-gotmpl"
-description = "Pure, safe Go text/template parsing and rendering, re-exporting the Sprig function set"
+description = "Pure, safe Go text/template parsing and rendering, with the function map supplied by the caller"
 version = "0.0.0-alpha.0"
 edition = "2024"
 rust-version = "1.100"
@@ -8,18 +8,19 @@ license = "MIT"
 repository = "https://github.com/neotales/rs-gotmpl"
 authors = ["x0craft"]
 readme = "README.md"
-keywords = ["template", "gotemplate", "helm", "sprig", "go"]
+keywords = ["template", "gotemplate", "go", "helm", "text-template"]
 categories = ["template-engine", "text-processing", "parser-implementations"]
 
-[dependencies]
-# The version is required as well as the path. Cargo ignores the version while the
-# path resolves, so a local build uses the sibling member, and the version is what
-# makes this crate publishable. Re-exporting the Sprig set rather than depending on
-# it privately is deliberate: two paths to one set of functions is a way for them
-# to disagree about what a function does.
-neotales-sprig = { path = "../sprig", version = "0.0.0-alpha.0" }
-
 [dev-dependencies]
+# The tests load a real helper set the way the neotales-sprig README shows, and
+# the parity suite compares this engine against those helpers. A dev-dependency
+# is the only edge between the two crates: neither published library depends on
+# the other, which is the direction Go's text/template and Sprig keep.
+#
+# The path carries no version on purpose. Cargo drops a path-only dev-dependency
+# from the packaged manifest, so a crate whose sibling is not on crates.io yet
+# can still be published; the tests and doctests keep working from the checkout.
+neotales-sprig = { path = "../sprig" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

@@ -31,14 +31,16 @@ fn map(entries: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<Str
 #[test]
 fn rejects_duplicate_and_mutually_recursive_definitions() {
     assert_eq!(
-        Template::parse("{{ define \"line\" }}one{{ end }}{{ define \"line\" }}two{{ end }}"),
-        Err(Error::DuplicateTemplate("line".into()))
+        Template::parse("{{ define \"line\" }}one{{ end }}{{ define \"line\" }}two{{ end }}")
+            .expect_err("a duplicate definition is refused"),
+        Error::DuplicateTemplate("line".into())
     );
     assert_eq!(
         Template::parse(
             "{{ define \"a\" }}{{ template \"b\" . }}{{ end }}{{ define \"b\" }}{{ template \"a\" . }}{{ end }}"
-        ),
-        Err(Error::RecursiveTemplate("a".into()))
+        )
+        .expect_err("a recursive definition is refused"),
+        Error::RecursiveTemplate("a".into())
     );
 }
 
@@ -79,7 +81,7 @@ fn bounds_output_iterations_and_function_calls() {
         );
     assert_eq!(iterations, Err(Error::ResourceLimitExceeded));
 
-    let calls = Template::parse("{{ upper .value }}{{ upper .value }}")
+    let calls = Template::parse("{{ len .value }}{{ len .value }}")
         .unwrap()
         .render_typed_with_options(
             &map([("value", Value::String("x".into()))]),
@@ -116,8 +118,9 @@ fn bounds_acyclic_named_template_fanout() {
 fn cancellation_is_observed_at_parse_and_render_boundaries() {
     let cancelled = || true;
     assert_eq!(
-        Template::parse_with_cancellation("hello", ParseOptions::default(), &cancelled),
-        Err(Error::Cancelled)
+        Template::parse_with_cancellation("hello", ParseOptions::default(), &cancelled)
+            .expect_err("a cancelled parse is refused"),
+        Error::Cancelled
     );
 
     let template = Template::parse("hello").unwrap();

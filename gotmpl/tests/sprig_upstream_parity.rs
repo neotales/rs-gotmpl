@@ -11,7 +11,8 @@
 //!
 //! The cases run through [`neotales_gotmpl::Template`] rather than calling the
 //! helper crate directly, so the whole path is covered: the template's argument
-//! handling, the typed-versus-rendered argument policy, and the helper itself.
+//! handling, the glue in `support` that loads the helper set the way the
+//! `neotales-sprig` README shows, and the helper itself.
 
 // `missing_docs` is a workspace lint aimed at the published API. A test
 // binary has no public API to document, so the lint firing here is noise
@@ -19,10 +20,14 @@
 // item in the crate is still reported.
 #![allow(missing_docs)]
 
+mod support;
+
 use std::collections::BTreeMap;
 
 use neotales_gotmpl::{Template, Value};
 use serde::Deserialize;
+
+use support::sprig_functions;
 
 /// One `(template, expected)` pair from the fixture.
 #[derive(Clone, Debug, Deserialize)]
@@ -165,6 +170,19 @@ fn helpers_in(template: &str) -> Vec<String> {
     names
 }
 
+/// The message a case expects to see when a helper refuses a call.
+///
+/// Two reference cases assert the text of the exception a bad call throws. That
+/// text belongs to the helper, and the engine wraps it in
+/// [`neotales_gotmpl::Error::Function`] so a caller can tell which function
+/// refused; the part the reference specifies is the helper's own message.
+fn reported_message(error: &neotales_gotmpl::Error) -> String {
+    match error {
+        neotales_gotmpl::Error::Function { message, .. } => message.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Every case in the fixture must render to its expected text.
 #[test]
 fn every_upstream_parity_case_renders_exactly() {
@@ -206,8 +224,9 @@ fn every_upstream_parity_case_renders_exactly() {
             skipped_cases.push(case.template.clone());
             continue;
         }
-        let rendered =
-            Template::parse(&case.template).and_then(|template| template.render_typed(&case_root));
+        let rendered = Template::parse(&case.template)
+            .map(|template| template.with_funcs(sprig_functions()))
+            .and_then(|template| template.render_typed(&case_root));
         match rendered {
             Ok(actual) if actual == case.expected => {}
             Ok(actual) => failures.push(format!(
@@ -222,7 +241,7 @@ fn every_upstream_parity_case_renders_exactly() {
             // satisfied by producing exactly that error. Without this the two
             // cases would report as failures while the helper was in fact
             // refusing the call the way the reference does.
-            Err(error) if error.to_string() == case.expected => {}
+            Err(error) if reported_message(&error) == case.expected => {}
             Err(error) => failures.push(format!(
                 "{:?}\n     expected {:?}\n     error     {error}\n     helpers   {:?}",
                 case.template,
@@ -521,6 +540,7 @@ fn merge_overwrite_does_not_share_a_nested_map_with_the_destination() {
     );
     let rendered = Template::parse(source)
         .expect("parses")
+        .with_funcs(sprig_functions())
         .render_typed(&fixture_root())
         .expect("renders");
     assert_eq!(
