@@ -20,7 +20,8 @@ categories = ["template-engine", "text-processing", "parser-implementations"]
 # The path carries no version on purpose. Cargo drops a path-only dev-dependency
 # from the packaged manifest, so a crate whose sibling is not on crates.io yet
 # can still be published; the tests and doctests keep working from the checkout.
-neotales-sprig = { path = "../sprig" }
+# The feature is what makes sprig's registration API available to these tests.
+neotales-sprig = { path = "../sprig", features = ["gotmpl"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

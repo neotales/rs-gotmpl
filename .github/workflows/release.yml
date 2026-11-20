@@ -31,10 +31,12 @@ env:
 
 jobs:
   # Runs on both triggers. On workflow_dispatch this job is the whole release:
-  # checks and a `cargo publish --dry-run` of both crates, never a real publish.
-  # The dry runs can go in either order: the two crates do not depend on each
-  # other, and the dev-dependency between them is path-only so packaging drops
-  # it. See RELEASE.md.
+  # checks and a `cargo publish --dry-run`, never a real publish.
+  #
+  # Only gotmpl is dry-run here. Sprig names gotmpl as an optional dependency by
+  # version, so its packaging resolves gotmpl from crates.io, where this version
+  # is not published until the publish job uploads it. Sprig is dry-run there,
+  # immediately before its upload. See RELEASE.md.
   check:
     name: pre-publish checks
     runs-on: ubuntu-latest
@@ -46,21 +48,31 @@ jobs:
         with:
           cache-key: release
 
+      # `cargo fmt` takes `--all`, which is the workspace spelling; it has no
+      # `--workspace` flag.
       - name: Format
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
 
-      # Neither crate depends on the other, so any order works and a failure is
-      # about the crate itself rather than about index lag. See RELEASE.md.
+      # `--all-targets` does not run doctests, and the README samples are the
+      # supported glue for both crates.
+      - name: Doctests
+        run: cargo test --workspace --doc --all-features
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --all-features --no-deps
+
+      # gotmpl has no published dependency on sprig, so it packages on its own.
+      # Sprig cannot be dry-run until this version is uploaded; see RELEASE.md.
       - name: Package without publishing
-        run: |
-          cargo publish -p neotales-sprig --dry-run --locked
-          cargo publish -p neotales-gotmpl --dry-run --locked
+        run: cargo publish -p neotales-gotmpl --dry-run --locked
 
   version:
     name: tag matches the crate version
@@ -146,14 +158,34 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
-      # The two crates are independent, so the order does not matter. Sprig is
-      # uploaded first only so the log has a fixed order.
+      # Sprig's `gotmpl` feature names this crate as an optional dependency by
+      # version, so it has to be on crates.io before sprig can be packaged. Skip
+      # the upload when a re-run finds the version already there: that is what
+      # makes a run that failed on sprig, usually to index lag, re-runnable.
+      - name: Publish the template crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -eu
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("gotmpl/Cargo.toml", "rb"))["package"]["version"])')
+          published=$(cargo search neotales-gotmpl --limit 1 2>/dev/null | head -n 1 || true)
+          case "${published}" in
+            "neotales-gotmpl = \"${version}\""*)
+              echo "neotales-gotmpl ${version} is already on crates.io; skipping the upload."
+              ;;
+            *)
+              cargo publish -p neotales-gotmpl --locked
+              ;;
+          esac
+
+      # Now that the version it names exists, sprig can be packaged and checked
+      # the way the check job checks gotmpl. The dry run can still fail while the
+      # index has not caught up with the upload above; re-running the job is the
+      # fix. See RELEASE.md.
+      - name: Package the helper crate without publishing
+        run: cargo publish -p neotales-sprig --dry-run --locked
+
       - name: Publish the helper crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish -p neotales-sprig --locked
-
-      - name: Publish the template crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p neotales-gotmpl --locked

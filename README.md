@@ -1,15 +1,16 @@
 # rs-gotmpl
 
-Two crates that do not depend on each other:
+Two crates that are independent by default:
 
 - `neotales-gotmpl` renders a pure, safe subset of Go `text/template`, and has no helper
   library of its own. The functions a template calls are registered by the caller.
-- `neotales-sprig` supplies the deterministic Sprig helpers, and knows nothing about a
-  template engine.
+- `neotales-sprig` supplies the deterministic Sprig helpers, and its default build knows
+  nothing about a template engine. Its optional `gotmpl` feature adds the glue that loads
+  the helpers into the engine — off by default, and never required by either crate.
 
-That is the direction Go keeps: `text/template` does not depend on Sprig, and Sprig does not
-depend on `text/template`. A program that wants both loads the helpers into the engine, and
-the [`neotales-sprig` README](sprig/README.md) has the sample that does it.
+That is the direction Go keeps: `text/template` does not depend on Sprig. A program that
+wants both turns the feature on, and the [`neotales-sprig` README](sprig/README.md) has the
+sample that does it.
 
 By [x0craft](https://github.com/x0craft).
 

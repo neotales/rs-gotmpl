@@ -13,24 +13,44 @@ other or from the tag, so a tag can never publish a version that differs from
 what is in the tree.
 
 This repository ships two crates that share the tag: `neotales-sprig` from
-`sprig/` and `neotales-gotmpl` from `gotmpl/`. They are independent: neither
-crate's published graph names the other, and the publish job can upload them in
-either order. The only edge between them is a dev-dependency each way, for the
-tests and for the sample in the `sprig` README, and cargo leaves a path-only
-dev-dependency out of the packaged manifest. That is why those two entries carry
-a `path` and no `version`: with a version, packaging would resolve the sibling
-from crates.io and the first publish of either crate would fail while the other
-does not exist yet.
+`sprig/` and `neotales-gotmpl` from `gotmpl/`. `neotales-gotmpl`'s published
+graph names nothing: the engine has no dependency on a helper set. `sprig/` names
+`neotales-gotmpl` as an **optional** dependency, which the `gotmpl` feature turns
+on, so a default build of the helper crate still names no engine.
+
+That one optional dependency is versioned, so packaging `sprig/` resolves
+`neotales-gotmpl` from crates.io. Two consequences:
+
+- `neotales-gotmpl` is published first. Its only edge to `sprig/` is a path-only
+  dev-dependency, which cargo leaves out of the packaged manifest, so it does not
+  need the helper crate to exist.
+- `neotales-sprig --dry-run` fails with `no matching package named
+  neotales-gotmpl` until that exact version is on crates.io. The `check` job
+  therefore dry-runs gotmpl only, and the publish job dry-runs sprig after it
+  uploads gotmpl, immediately before uploading sprig.
 
 Bump the version, commit, push, then tag that commit:
 
 ```sh
-cargo publish -p neotales-sprig --dry-run --locked
 cargo publish -p neotales-gotmpl --dry-run --locked
+cargo publish -p neotales-sprig --dry-run --locked   # only once gotmpl's version is on crates.io
 git tag v0.3.1
 git push origin dev
 git push origin v0.3.1
 ```
+
+The tag uploads both crates, in this order, and neither upload is optional:
+
+```sh
+cargo publish -p neotales-gotmpl --locked
+cargo publish -p neotales-sprig --locked
+```
+
+The tag run publishes gotmpl, then sprig. A second upload of the gotmpl version
+is skipped, so a run that failed on sprig — the usual cause is crates.io index
+lag between the two uploads — can be re-run as soon as the index lists gotmpl.
+Sprig is not skipped: a version that is already uploaded is an error, not a
+no-op.
 
 The one exception is a new crate's first version, which is uploaded by hand and
 never from a tag. That is the next section.
@@ -53,12 +73,12 @@ not part of any one crate.
 1. Set `version = "0.0.0-alpha.0"` in `gotmpl/Cargo.toml` and
    `sprig/Cargo.toml`, commit it, and leave the working tree clean. Do not
    publish from a tree with uncommitted changes.
-2. Run the script with each crate's directory, in either order: the two crates
-   do not depend on each other, so neither has to exist before the other.
+2. Run the script with each crate's directory, gotmpl first: sprig's optional
+   dependency needs that version on crates.io before sprig can be packaged.
 
    ```sh
-   ~/work/rs/publish.sh sprig
    ~/work/rs/publish.sh gotmpl
+   ~/work/rs/publish.sh sprig
    ```
 
    The script reads the token itself and passes it to `cargo` through the
@@ -94,8 +114,9 @@ at `~/work/rs/README.STYLE.md` and is not part of a crate.
    lockfile is what the scheduled audit checks.
 2. Push the commit.
 3. Tag it `vX.Y.Z` and push the tag.
-4. The workflow runs the checks, then `cargo publish --dry-run`, then publishes
-   with a token minted for that run.
+4. The workflow runs the checks, dry-runs gotmpl, publishes it, dry-runs sprig
+   against the published gotmpl, then publishes sprig, all with a token minted
+   for that run.
 
 A manual run, `workflow_dispatch`, runs the checks and the dry run only. It
 never publishes, whatever branch it is started from.
@@ -120,5 +141,6 @@ cannot publish this crate later.
 | --- | --- |
 | `version` job: tag does not match `vX.Y.Z` | `Cargo.toml` version and the tag disagree. Delete the tag, fix, re-tag. |
 | Publish job: OIDC exchange fails | The crate does not exist yet, or the trusted publisher does not match: wrong repository, wrong workflow filename, or an environment name that is set on one side and not the other. |
-| Publish job: version already uploaded | The version was published before, usually by the manual first release. Bump the version. |
+| Publish job: version already uploaded | The version was published before, usually by the manual first release. Bump the version. Gotmpl is skipped instead, so a failed sprig upload can be re-run. |
+| Sprig package or publish: `no matching package named neotales-gotmpl` | Sprig's optional `gotmpl` dependency needs that exact version on crates.io. Publish gotmpl first; the publish job does, and skips it when it is already there. |
 | Publish job: `cargo publish` rejects the token | Trusted Publishing Only mode is on and the crate has no trusted publisher configured. |

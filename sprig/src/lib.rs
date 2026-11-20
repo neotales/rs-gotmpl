@@ -30,10 +30,10 @@
 //! whose answer depends on nothing but its arguments, for a caller that needs the
 //! same bytes from two runs.
 //!
-//! This crate is not a template engine and does not depend on one. The README
-//! shows the whole glue for loading these helpers into `neotales-gotmpl`, or into
-//! any engine that takes a `(name, function)` map: [`call`] is the only entry
-//! point the glue needs.
+//! This crate is not a template engine: a default build names none. The optional
+//! `gotmpl` feature adds `register`, `register_group` and `register_hermetic`,
+//! which load these helpers into a `neotales_gotmpl::FuncMap`; any other engine
+//! takes a `(name, function)` map built from [`call`].
 #![doc = include_str!("../README.md")]
 
 use std::fmt::Write as _;
@@ -45,6 +45,8 @@ mod defaults;
 mod dicts;
 mod encoding;
 mod env;
+#[cfg(feature = "gotmpl")]
+mod gotmpl;
 mod groups;
 mod lists;
 mod math;
@@ -59,6 +61,8 @@ mod types;
 mod urls;
 
 pub use context::Context;
+#[cfg(feature = "gotmpl")]
+pub use gotmpl::{register, register_group, register_hermetic};
 pub use groups::{FunctionGroup, NONHERMETIC, group_names, hermetic_names};
 
 /// The signature every helper module dispatches through.

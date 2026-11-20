@@ -89,14 +89,13 @@ hit returns `Error::ResourceLimitExceeded` without echoing the rendered values.
 state, and it calls no clock. Everything a template produces is a function of the values
 and the caller's function map.
 
-**Add Sprig if you want it.** `neotales-sprig` is a separate crate and does not depend on
-this one, which is the direction Go keeps between `text/template` and Sprig. Load it the
-way the [`neotales-sprig` README](../sprig/README.md) shows: convert the two value types
-once, register the names you want through `FuncMap::insert`, and `upper`, `default`, `list`
-and the rest become available. `group_names` gives you one section of the set at a time and
-`hermetic_names` gives you the repeatable subset, so no name list has to be typed by hand.
-Nothing here assumes any of it is present, and a template that calls a name the map does
-not hold fails with `Error::UnknownFunction` rather than rendering nothing.
+**Add Sprig if you want it.** `neotales-sprig` is a separate crate. A default build of it
+names no engine: its `gotmpl` feature adds `register`, `register_group` and
+`register_hermetic`, which load a name list, one Go Sprig group, or the hermetic set into a
+`FuncMap` without the caller writing the conversion. The
+[`neotales-sprig` README](../sprig/README.md) has the samples. Nothing here assumes any of it
+is present, and a template that calls a name the map does not hold fails with
+`Error::UnknownFunction` rather than rendering nothing.
 
 ## Licence 📜
 

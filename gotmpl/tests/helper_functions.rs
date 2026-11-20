@@ -20,9 +20,7 @@ use std::collections::BTreeMap;
 
 use neotales_gotmpl::{Error, MissingValueBehavior, RenderOptions, Template, Value};
 use neotales_sprig::FunctionGroup;
-use support::{
-    group_functions, hermetic_functions, sprig_functions, sprig_functions_with_environment,
-};
+use support::{group_functions, hermetic_functions, sprig_functions};
 
 fn render(source: &str, root: &BTreeMap<String, Value>) -> Result<String, Error> {
     Template::parse(source)
@@ -124,25 +122,18 @@ fn evaluates_safe_helpers_and_pipelines_without_host_access() {
     );
 }
 
-/// `env` reads the environment the caller gives it and nothing else.
+/// `env` reads a `Context`, and the shared registration passes none.
 ///
-/// The engine has no environment of its own, so a caller that wants `env` closes
-/// over the map it wants read when it builds the function map. That is the same
-/// guarantee as before — a rendered file depends only on its inputs, never on the
-/// process environment — with the decision moved to the caller.
+/// The engine has no environment of its own and the helper set is registered
+/// without one, so `env` answers with the empty string. That is the guarantee
+/// that matters: a rendered file depends on its inputs, never on the process
+/// environment. Asserting a name that is set in the process — `PATH` — is the
+/// half that would fail if a helper ever fell back to the host.
 #[test]
-fn env_reads_the_environment_the_caller_supplies() {
-    let functions =
-        sprig_functions_with_environment(BTreeMap::from([("NAME".to_owned(), "neo".to_owned())]));
-    let rendered = Template::parse(r#"{{ env "NAME" }}|{{ env "ABSENT" }}"#)
-        .expect("parses")
-        .with_funcs(functions)
-        .render(&BTreeMap::new())
-        .expect("renders");
-    // A name that is not set is the empty string, as Go's sprig `env` is,
-    // rather than an error: a template that probes for an optional value must
-    // not fail because the value is absent.
-    assert_eq!(rendered, "neo|");
+fn env_reads_no_environment_through_the_shared_registration() {
+    let rendered =
+        render(r#"{{ env "NAME" }}|{{ env "PATH" }}"#, &BTreeMap::new()).expect("renders");
+    assert_eq!(rendered, "|");
 }
 
 /// A bare token in a template has its Go literal type.
